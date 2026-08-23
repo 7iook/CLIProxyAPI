@@ -597,6 +597,9 @@ type ClaudeKey struct {
 	// APIKey is the authentication key for accessing Claude API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// CredentialGroup restricts this credential to downstream keys assigned to the same group.
+	CredentialGroup string `yaml:"credential-group,omitempty" json:"credential-group,omitempty"`
+
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
@@ -717,6 +720,9 @@ type CodexKey struct {
 	// APIKey is the authentication key for accessing Codex API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// CredentialGroup restricts this credential to downstream keys assigned to the same group.
+	CredentialGroup string `yaml:"credential-group,omitempty" json:"credential-group,omitempty"`
+
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
@@ -834,6 +840,9 @@ type MetaModel = CodexModel
 type GeminiKey struct {
 	// APIKey is the authentication key for accessing Gemini API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// CredentialGroup restricts this credential to downstream keys assigned to the same group.
+	CredentialGroup string `yaml:"credential-group,omitempty" json:"credential-group,omitempty"`
 
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
@@ -964,6 +973,9 @@ type OpenAICompatibility struct {
 type OpenAICompatibilityAPIKey struct {
 	// APIKey is the authentication key for accessing the external API services.
 	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// CredentialGroup restricts this credential to downstream keys assigned to the same group.
+	CredentialGroup string `yaml:"credential-group,omitempty" json:"credential-group,omitempty"`
 
 	// Weight controls proportional selection under weighted-round-robin.
 	// An omitted value defaults to 1; non-positive values exclude this credential; maximum 1,000,000.
