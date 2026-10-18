@@ -2085,8 +2085,49 @@ func (m *Manager) SelectHomeAuthByKind(ctx context.Context, provider string, mod
 	}
 }
 
+// pickDisabledPinned returns the pinned auth when the request allows disabled pinned auths and that auth is disabled.
+// Enabled auths keep the normal selection path. Local patch for claude-keep-rolling.
+func (m *Manager) pickDisabledPinned(providers []string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, bool) {
+	if allowed, _ := opts.Metadata[cliproxyexecutor.AllowDisabledPinnedAuthMetadataKey].(bool); !allowed {
+		return nil, nil, "", false
+	}
+	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	if pinnedAuthID == "" {
+		return nil, nil, "", false
+	}
+	if _, used := tried[pinnedAuthID]; used {
+		return nil, nil, "", false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	auth := m.auths[pinnedAuthID]
+	if auth == nil || (!auth.Disabled && auth.Status != StatusDisabled) {
+		return nil, nil, "", false
+	}
+	provider := canonicalSchedulingProvider(executorKeyFromAuth(auth))
+	matched := false
+	for _, candidate := range providers {
+		if canonicalSchedulingProvider(candidate) == provider {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return nil, nil, "", false
+	}
+	executor, okExecutor := m.executorLocked(provider)
+	if !okExecutor {
+		return nil, nil, "", false
+	}
+	auth.EnsureIndex()
+	return auth.Clone(), executor, provider, true
+}
+
 func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
 	opts.EnsureMetadata()
+	if auth, executor, _, ok := m.pickDisabledPinned([]string{provider}, opts, tried); ok {
+		return auth, executor, nil
+	}
 	if m.HomeEnabled() {
 		auth, exec, _, err := m.pickNextViaHome(ctx, model, opts, tried)
 		return auth, exec, err
@@ -2273,6 +2314,9 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 
 func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, string, error) {
 	opts.EnsureMetadata()
+	if auth, executor, provider, ok := m.pickDisabledPinned(providers, opts, tried); ok {
+		return auth, executor, provider, nil
+	}
 	if m.HomeEnabled() {
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}

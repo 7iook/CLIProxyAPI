@@ -77,6 +77,24 @@ func WithPinnedAuthID(ctx context.Context, authID string) context.Context {
 	return context.WithValue(ctx, pinnedAuthContextKey{}, authID)
 }
 
+type allowDisabledPinnedAuthContextKey struct{}
+
+// withAllowDisabledPinnedAuth marks a plugin-issued pinned request as allowed to use a disabled auth.
+func withAllowDisabledPinnedAuth(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, allowDisabledPinnedAuthContextKey{}, true)
+}
+
+func allowDisabledPinnedAuthFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	allowed, _ := ctx.Value(allowDisabledPinnedAuthContextKey{}).(bool)
+	return allowed
+}
+
 // WithSelectedAuthIDCallback returns a child context that receives the selected auth ID.
 func WithSelectedAuthIDCallback(ctx context.Context, callback func(string)) context.Context {
 	if callback == nil {

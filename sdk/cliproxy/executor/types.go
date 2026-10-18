@@ -15,6 +15,10 @@ const RequestedModelMetadataKey = "requested_model"
 // It is optional and may be absent for non-HTTP executions.
 const RequestPathMetadataKey = "request_path"
 
+// AllowDisabledPinnedAuthMetadataKey lets a plugin-issued request run on its pinned auth even when that auth is disabled.
+// Local patch: disabled accounts stay out of normal routing but plugins such as claude-keep-rolling can still ping them.
+const AllowDisabledPinnedAuthMetadataKey = "allow_disabled_pinned_auth"
+
 // DisallowFreeAuthMetadataKey instructs auth selection to skip known free-tier credentials.
 const DisallowFreeAuthMetadataKey = "disallow_free_auth"
 

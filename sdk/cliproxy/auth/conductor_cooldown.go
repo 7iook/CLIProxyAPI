@@ -900,12 +900,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	defer releaseMutation()
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
-		if isStaleExecutionResult(result, auth) {
-			staleEpoch := result.RegistrationEpoch > 0 && result.RegistrationEpoch < auth.RegistrationEpoch
-			if !staleEpoch && !result.Success && !shouldSkipCredentialCooldown(result.Error) && (statusCodeFromResult(result.Error) == http.StatusUnauthorized || isUnauthorizedError(result.Error)) && result.AccessToken != "" {
-				if recordRejectedTokenOnAuth(auth, result.AccessToken) {
-					auth.Generation++
-					auth.UpdatedAt = now
+		// Local patch: a plugin ping on a disabled auth must not flip it back to active or record cooldowns.
+		if isStaleExecutionResult(result, auth) || auth.Disabled || auth.Status == StatusDisabled {
+			if isStaleExecutionResult(result, auth) {
+				staleEpoch := result.RegistrationEpoch > 0 && result.RegistrationEpoch < auth.RegistrationEpoch
+				if !staleEpoch && !result.Success && !shouldSkipCredentialCooldown(result.Error) && (statusCodeFromResult(result.Error) == http.StatusUnauthorized || isUnauthorizedError(result.Error)) && result.AccessToken != "" {
+					if recordRejectedTokenOnAuth(auth, result.AccessToken) {
+						auth.Generation++
+						auth.UpdatedAt = now
+					}
 				}
 			}
 			m.mu.Unlock()
@@ -1442,7 +1445,8 @@ func (m *Manager) recordAvailabilityNeutralResult(ctx context.Context, result Re
 	defer releaseMutation()
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
-		if isStaleExecutionResult(result, auth) {
+		// Local patch: a plugin ping on a disabled auth must not flip it back to active or record cooldowns.
+		if isStaleExecutionResult(result, auth) || auth.Disabled || auth.Status == StatusDisabled {
 			m.mu.Unlock()
 			releaseMutation()
 			m.hook.OnResult(ctx, result)

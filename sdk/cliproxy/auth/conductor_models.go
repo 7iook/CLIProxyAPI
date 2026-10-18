@@ -305,10 +305,19 @@ func (m *Manager) filterExecutionModels(auth *Auth, routeModel string, candidate
 		return nil
 	}
 	now := time.Now()
+	// Local patch: disabled auths only reach execution through an allowed plugin pin, so judge their
+	// models by cooldown/quota state alone instead of treating the disabled flag as a block.
+	blockAuth := auth
+	if auth != nil && (auth.Disabled || auth.Status == StatusDisabled) {
+		copied := *auth
+		copied.Disabled = false
+		copied.Status = StatusActive
+		blockAuth = &copied
+	}
 	out := make([]string, 0, len(candidates))
 	for _, upstreamModel := range candidates {
 		stateModel := m.stateModelForExecution(auth, routeModel, upstreamModel, pooled)
-		blocked, _, _ := isAuthBlockedForModel(auth, stateModel, now)
+		blocked, _, _ := isAuthBlockedForModel(blockAuth, stateModel, now)
 		if blocked {
 			continue
 		}

@@ -966,7 +966,7 @@ func TestExecuteModelPinsExactAuthAcrossPrioritiesWithoutFallback(t *testing.T) 
 		t.Fatal("ExecuteModel() with non-existent AuthID error = nil, want auth_not_found")
 	}
 
-	// 4. Pinning to disabled auth fails without falling back
+	// 4. Local patch: plugin pins may target a disabled auth (claude-keep-rolling)
 	_, errMsg = handler.ExecuteModel(context.Background(), ModelExecutionRequest{
 		EntryProtocol:  "openai",
 		ExitProtocol:   "openai",
@@ -975,8 +975,8 @@ func TestExecuteModelPinsExactAuthAcrossPrioritiesWithoutFallback(t *testing.T) 
 		ForcedProvider: "pinned-provider",
 		AuthID:         "auth-disabled",
 	})
-	if errMsg == nil {
-		t.Fatal("ExecuteModel() with disabled AuthID error = nil, want auth_not_found")
+	if errMsg != nil {
+		t.Fatalf("ExecuteModel() with disabled AuthID error = %v, want success", errMsg.Error)
 	}
 }
 

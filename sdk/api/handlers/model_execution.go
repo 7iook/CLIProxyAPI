@@ -116,6 +116,7 @@ func (h *BaseAPIHandler) ExecuteModel(ctx context.Context, req ModelExecutionReq
 	}
 	if req.AuthID != "" {
 		ctx = WithPinnedAuthID(ctx, req.AuthID)
+		ctx = withAllowDisabledPinnedAuth(ctx)
 	}
 	allowImageModel := isModelExecutionImageProtocol(req.EntryProtocol) || isModelExecutionImageProtocol(req.ExitProtocol)
 	body, headers, errMsg := h.executeWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, allowImageModel, modelExecutionOptions{
@@ -153,6 +154,7 @@ func (h *BaseAPIHandler) ExecuteModelStream(ctx context.Context, req ModelExecut
 	}
 	if req.AuthID != "" {
 		ctx = WithPinnedAuthID(ctx, req.AuthID)
+		ctx = withAllowDisabledPinnedAuth(ctx)
 	}
 	allowImageModel := isModelExecutionImageProtocol(req.EntryProtocol) || isModelExecutionImageProtocol(req.ExitProtocol)
 	dataChan, headers, errChan := h.executeStreamWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, allowImageModel, modelExecutionOptions{
