@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 func TestNormalizeAPIKeyCredentialGroupsKeepsConfiguredKeysOnly(t *testing.T) {
@@ -43,7 +43,7 @@ func TestPruneAPIKeyCredentialGroupsAfterAPIKeyRemoval(t *testing.T) {
 	handler.pruneAPIKeyCredentialGroups()
 
 	want := map[string][]string{"client-b": {"team-b"}}
-	if !reflect.DeepEqual(cfg.APIKeyCredentialGroups, want) {
-		t.Fatalf("APIKeyCredentialGroups = %#v, want %#v", cfg.APIKeyCredentialGroups, want)
+	if !reflect.DeepEqual(handler.cfg.APIKeyCredentialGroups, want) {
+		t.Fatalf("APIKeyCredentialGroups = %#v, want %#v", handler.cfg.APIKeyCredentialGroups, want)
 	}
 }

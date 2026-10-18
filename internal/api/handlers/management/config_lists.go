@@ -194,8 +194,10 @@ func (h *Handler) PutAPIKeyCredentialGroups(c *gin.Context) {
 			groups = body.Items
 		}
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.cfg.APIKeyCredentialGroups = normalizeAPIKeyCredentialGroups(groups, h.cfg.APIKeys)
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 func (h *Handler) PatchAPIKeyCredentialGroups(c *gin.Context) {
@@ -208,6 +210,8 @@ func (h *Handler) PatchAPIKeyCredentialGroups(c *gin.Context) {
 		return
 	}
 	key := strings.TrimSpace(body.Key)
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if !containsTrimmedString(h.cfg.APIKeys, key) {
 		c.JSON(400, gin.H{"error": "api key is not configured"})
 		return
@@ -219,7 +223,7 @@ func (h *Handler) PatchAPIKeyCredentialGroups(c *gin.Context) {
 	// An explicitly empty list is fail-closed. Use DELETE to remove the
 	// restriction and restore legacy unrestricted behavior for this key.
 	h.cfg.APIKeyCredentialGroups[key] = normalized
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 func (h *Handler) DeleteAPIKeyCredentialGroups(c *gin.Context) {
@@ -228,8 +232,10 @@ func (h *Handler) DeleteAPIKeyCredentialGroups(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "missing key"})
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	delete(h.cfg.APIKeyCredentialGroups, key)
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 func (h *Handler) pruneAPIKeyCredentialGroups() {
