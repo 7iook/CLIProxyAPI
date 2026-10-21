@@ -3,7 +3,6 @@ package executor
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
@@ -32,29 +31,7 @@ func (e *ClaudeExecutor) ShouldPrepareRequestAuth(auth *cliproxyauth.Auth) bool 
 }
 
 func isClaudeSetupToken(auth *cliproxyauth.Auth, apiKey string) bool {
-	if !isClaudeOAuthToken(apiKey) || auth == nil {
-		return false
-	}
-	if skip, _ := auth.Metadata["skip_account_profile"].(bool); skip {
-		return true
-	}
-	if isSetup, _ := auth.Metadata["is_setup_token"].(bool); isSetup {
-		return true
-	}
-	if isSetup, _ := auth.Metadata["setup_token"].(bool); isSetup {
-		return true
-	}
-	if kind := strings.ToLower(auth.Attributes["auth_kind"]); kind == "setup_token" || kind == "setup-token" {
-		return true
-	}
-	scopes := strings.ToLower(claudeauth.ReadMetadataString(&auth.Metadata, "scopes"))
-	if scopes == "" {
-		scopes = strings.ToLower(claudeauth.ReadMetadataString(&auth.Metadata, "scope"))
-	}
-	if scopes != "" && !strings.Contains(scopes, "user:profile") && !strings.Contains(scopes, "user:office") {
-		return true
-	}
-	return false
+	return cliproxyauth.IsClaudeSetupTokenCredential(auth, apiKey)
 }
 
 func isClaudeOAuthScope403(err error) bool {
@@ -185,18 +162,5 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 // IsClaudeSetupTokenAuth reports whether auth is a Claude credential created
 // by `claude setup-token` (inference-only OAuth token).
 func IsClaudeSetupTokenAuth(auth *cliproxyauth.Auth) bool {
-	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
-		return false
-	}
-	apiKey, _ := claudeCreds(auth)
-	return isClaudeSetupToken(auth, apiKey)
-}
-
-// recordClaudeSetupTokenRateLimit keeps the unified rate-limit headers of a
-// setup-token response so the management quota view can show them.
-func recordClaudeSetupTokenRateLimit(auth *cliproxyauth.Auth, header http.Header) {
-	if !IsClaudeSetupTokenAuth(auth) {
-		return
-	}
-	claudeauth.RecordRateLimitHeaders(auth.ID, header, time.Now())
+	return cliproxyauth.IsClaudeSetupTokenAuth(auth)
 }
