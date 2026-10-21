@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -179,4 +180,23 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	claudeauth.StoreMetadataValue(&auth.Metadata, "type", "claude")
 	claudeauth.StoreMetadataValue(&auth.Metadata, "last_refresh", time.Now().Format(time.RFC3339))
 	return auth, nil
+}
+
+// IsClaudeSetupTokenAuth reports whether auth is a Claude credential created
+// by `claude setup-token` (inference-only OAuth token).
+func IsClaudeSetupTokenAuth(auth *cliproxyauth.Auth) bool {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
+		return false
+	}
+	apiKey, _ := claudeCreds(auth)
+	return isClaudeSetupToken(auth, apiKey)
+}
+
+// recordClaudeSetupTokenRateLimit keeps the unified rate-limit headers of a
+// setup-token response so the management quota view can show them.
+func recordClaudeSetupTokenRateLimit(auth *cliproxyauth.Auth, header http.Header) {
+	if !IsClaudeSetupTokenAuth(auth) {
+		return
+	}
+	claudeauth.RecordRateLimitHeaders(auth.ID, header, time.Now())
 }

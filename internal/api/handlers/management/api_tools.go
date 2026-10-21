@@ -233,6 +233,11 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
+	if substitute, ok := claudeSetupTokenUsageFallback(auth, method, parsedURL, resp.StatusCode); ok {
+		c.JSON(http.StatusOK, substitute)
+		return
+	}
+
 	c.JSON(http.StatusOK, apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
