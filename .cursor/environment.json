@@ -1,0 +1,4 @@
+{
+  "name": "CLIProxyAPI",
+  "install": "go mod download"
+}
