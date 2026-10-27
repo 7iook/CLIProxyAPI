@@ -132,6 +132,12 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	if auth == nil {
 		return nil, fmt.Errorf("claude executor: auth is nil")
 	}
+	// Setup tokens (`claude setup-token`) are long-lived inference-only tokens.
+	// The OAuth refresh endpoint rejects them (403), so validate them with a
+	// minimal probe instead of rotating.
+	if IsClaudeSetupTokenAuth(auth) {
+		return e.refreshSetupTokenByProbe(ctx, auth)
+	}
 	refreshToken := claudeauth.ReadMetadataString(&auth.Metadata, "refresh_token")
 	if refreshToken == "" {
 		refreshToken = claudeauth.ReadMetadataString(&auth.Metadata, "refreshToken")

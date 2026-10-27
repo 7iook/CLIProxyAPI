@@ -32,6 +32,8 @@ type ClaudeExecutor struct {
 	requestLogProvider      string
 	upstreamModelNormalizer func(string) string
 	oauthProfileFetcher     claudeOAuthProfileFetcher
+	// setupTokenProber overrides the live setup-token probe (tests only).
+	setupTokenProber claudeSetupTokenProber
 	// oauthToolAliases is shared by every ForAPIKey copy of this executor;
 	// constructors allocate it so copies made per request reuse one store.
 	oauthToolAliases *claudeOAuthToolAliasStore

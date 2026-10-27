@@ -38,6 +38,10 @@ var claudeUnifiedWindows = []struct{ header, key string }{
 	{"7d_oi", "iguana_necktie"},
 }
 
+// ClaudeSetupTokenProbeInterval is how often a Claude setup-token credential is
+// revalidated by a 1-token probe in place of an OAuth refresh.
+const ClaudeSetupTokenProbeInterval = 12 * time.Hour
+
 type setupTokenWindow struct {
 	Utilization float64
 	ResetsAt    time.Time

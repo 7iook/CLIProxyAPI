@@ -148,6 +148,16 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 		}
 	}
 
+	// Claude setup tokens cannot be rotated; their "refresh" is a minimal probe.
+	// Ignore the nominal expiry and probe at a fixed, quota-friendly interval.
+	if IsClaudeSetupTokenAuth(a) {
+		interval := authPreferredInterval(a)
+		if interval <= 0 {
+			interval = ClaudeSetupTokenProbeInterval
+		}
+		return lastRefresh.IsZero() || now.Sub(lastRefresh) >= interval
+	}
+
 	expiry, hasExpiry := a.ExpirationTime()
 
 	if interval := authPreferredInterval(a); interval > 0 {
