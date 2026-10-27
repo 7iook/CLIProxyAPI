@@ -8,6 +8,7 @@ import (
 	"time"
 
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/claude"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
@@ -26,7 +27,7 @@ const (
 
 // claudeSetupTokenProber sends a minimal request with auth and returns the
 // upstream HTTP status (0 when the request did not reach upstream) and error.
-type claudeSetupTokenProber func(context.Context, *cliproxyauth.Auth) (int, error)
+type claudeSetupTokenProber func(context.Context, *cliproxyauth.Auth) (int, http.Header, error)
 
 // setupTokenProbeError is returned when the probe proves the token is invalid.
 type setupTokenProbeError struct {
@@ -38,11 +39,11 @@ type setupTokenProbeError struct {
 func (e setupTokenProbeError) Error() string   { return e.msg }
 func (e setupTokenProbeError) StatusCode() int { return e.code }
 
-func (e *ClaudeExecutor) probeSetupToken(ctx context.Context, auth *cliproxyauth.Auth) (int, error) {
+func (e *ClaudeExecutor) probeSetupToken(ctx context.Context, auth *cliproxyauth.Auth) (int, http.Header, error) {
 	if e.setupTokenProber != nil {
 		return e.setupTokenProber(ctx, auth)
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, claudeSetupTokenProbeTimeout)
+	probeCtx, cancel := context.WithTimeout(internallogging.WithFreshResponseHeadersHolder(ctx), claudeSetupTokenProbeTimeout)
 	defer cancel()
 	payload := []byte(`{"model":"` + claudeSetupTokenProbeModel + `","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}`)
 	_, err := e.Execute(probeCtx, auth, cliproxyexecutor.Request{
@@ -53,14 +54,15 @@ func (e *ClaudeExecutor) probeSetupToken(ctx context.Context, auth *cliproxyauth
 		SourceFormat:    sdktranslator.FromString("claude"),
 		OriginalRequest: payload,
 	})
+	headers := internallogging.GetResponseHeaders(probeCtx)
 	if err == nil {
-		return http.StatusOK, nil
+		return http.StatusOK, headers, nil
 	}
 	var sc interface{ StatusCode() int }
 	if errors.As(err, &sc) && sc != nil {
-		return sc.StatusCode(), err
+		return sc.StatusCode(), headers, err
 	}
-	return 0, err
+	return 0, headers, err
 }
 
 // refreshSetupTokenByProbe is the setup-token equivalent of an OAuth refresh:
@@ -74,7 +76,7 @@ func (e *ClaudeExecutor) refreshSetupTokenByProbe(ctx context.Context, auth *cli
 			return auth, nil
 		}
 	}
-	status, err := e.probeSetupToken(ctx, auth)
+	status, headers, err := e.probeSetupToken(ctx, auth)
 	if errCtx := ctx.Err(); errCtx != nil && err != nil {
 		return nil, errCtx
 	}
@@ -85,6 +87,7 @@ func (e *ClaudeExecutor) refreshSetupTokenByProbe(ctx context.Context, auth *cli
 	case err == nil, status == http.StatusTooManyRequests:
 		// 429 means the token authenticated but the account is rate limited.
 		claudeauth.StoreMetadataValue(&auth.Metadata, "last_refresh", now.Format(time.RFC3339))
+		cliproxyauth.RecordClaudeSetupTokenProbeHeaders(auth, headers, now)
 		log.Infof("claude executor: setup-token probe ok for %s (status %d)", auth.ID, status)
 		return auth, nil
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:

@@ -3,6 +3,7 @@ package auth
 import (
 	"encoding/json"
 	"math"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -251,4 +252,54 @@ func ClaudeSetupTokenUsageJSON(auth *Auth, now time.Time) ([]byte, bool) {
 	}
 	body, err := json.Marshal(out)
 	return body, err == nil
+}
+
+// claudeSetupTokenNextProbeAt returns when a setup-token credential is next due
+// for its validation probe: last_refresh + interval (refresh_interval_seconds
+// overrides ClaudeSetupTokenProbeInterval), or now when never probed.
+func claudeSetupTokenNextProbeAt(a *Auth, now time.Time) time.Time {
+	interval := authPreferredInterval(a)
+	if interval <= 0 {
+		interval = ClaudeSetupTokenProbeInterval
+	}
+	last := a.LastRefreshedAt
+	if last.IsZero() {
+		if ts, ok := authLastRefreshTimestamp(a); ok {
+			last = ts
+		}
+	}
+	if last.IsZero() {
+		return now
+	}
+	next := last.Add(interval)
+	if !a.NextRefreshAfter.IsZero() && a.NextRefreshAfter.After(next) {
+		next = a.NextRefreshAfter
+	}
+	if next.Before(now) {
+		return now
+	}
+	return next
+}
+
+// RecordClaudeSetupTokenProbeHeaders stores the unified rate-limit headers of a
+// setup-token probe response as the auth's quota observation and persisted
+// copy, so the quota panel has data even before real traffic.
+func RecordClaudeSetupTokenProbeHeaders(auth *Auth, headers http.Header, now time.Time) bool {
+	if auth == nil || !IsClaudeSetupTokenAuth(auth) {
+		return false
+	}
+	if !auth.Quota.ObserveResponseHeadersForProvider("claude", headers, now) {
+		return false
+	}
+	q, ok := quotaFromSignals(auth.Quota.Signals, auth.Quota.ObservedAt)
+	if !ok {
+		return false
+	}
+	md := cloneMetadataMap(auth.Metadata)
+	if md == nil {
+		md = map[string]any{}
+	}
+	md[ClaudeSetupTokenQuotaMetadataKey] = q.metadataValue()
+	auth.Metadata = md
+	return true
 }

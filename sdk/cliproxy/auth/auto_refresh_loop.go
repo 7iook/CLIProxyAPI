@@ -436,6 +436,15 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 		return time.Time{}, false
 	}
 
+	// Claude setup tokens: a probe every ClaudeSetupTokenProbeInterval, never
+	// for disabled credentials, independent of expiry/provider lead.
+	if IsClaudeSetupTokenAuth(auth) {
+		if auth.Disabled || auth.Status == StatusDisabled {
+			return time.Time{}, false
+		}
+		return claudeSetupTokenNextProbeAt(auth, now), true
+	}
+
 	if evaluator, ok := auth.Runtime.(RefreshEvaluator); ok && evaluator != nil {
 		if interval <= 0 {
 			interval = refreshCheckInterval

@@ -135,6 +135,13 @@ func (h *Handler) APICall(c *gin.Context) {
 
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
 	auth := h.authByIndex(authIndex)
+	// Claude setup tokens always get 403 from /api/oauth/usage. Serve their quota
+	// from observed rate-limit headers; when none exist yet, run the
+	// setup-token probe (a 1-token refresh) once to obtain them.
+	if substitute, ok := h.claudeSetupTokenUsageWithProbe(c.Request.Context(), authIndex, auth, method, parsedURL); ok {
+		c.JSON(http.StatusOK, substitute)
+		return
+	}
 
 	reqHeaders := body.Header
 	if reqHeaders == nil {

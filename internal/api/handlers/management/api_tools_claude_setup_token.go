@@ -1,6 +1,7 @@
 package management
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"strings"
@@ -40,4 +41,28 @@ func claudeSetupTokenUsageFallback(auth *coreauth.Auth, method string, target *u
 		},
 		Body: string(body),
 	}, true
+}
+
+// claudeSetupTokenUsageWithProbe answers a setup-token /api/oauth/usage query
+// without calling the endpoint (it always returns 403 for setup tokens). When
+// no quota observation exists yet, it forces one setup-token refresh probe
+// (throttled by the executor) and retries. ok=false keeps the legacy path.
+func (h *Handler) claudeSetupTokenUsageWithProbe(ctx context.Context, authIndex string, auth *coreauth.Auth, method string, target *url.URL) (apiCallResponse, bool) {
+	if auth == nil || !coreauth.IsClaudeSetupTokenAuth(auth) {
+		return apiCallResponse{}, false
+	}
+	if resp, ok := claudeSetupTokenUsageFallback(auth, method, target, http.StatusForbidden); ok {
+		return resp, true
+	}
+	if method != http.MethodGet || target == nil || !strings.EqualFold(target.Hostname(), "api.anthropic.com") || strings.TrimRight(target.Path, "/") != "/api/oauth/usage" {
+		return apiCallResponse{}, false
+	}
+	if h == nil || h.authManager == nil {
+		return apiCallResponse{}, false
+	}
+	refreshed, err := h.authManager.ForceRefreshAuth(ctx, auth.ID)
+	if err != nil || refreshed == nil {
+		return apiCallResponse{}, false
+	}
+	return claudeSetupTokenUsageFallback(refreshed, method, target, http.StatusForbidden)
 }
