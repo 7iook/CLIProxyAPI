@@ -33,11 +33,18 @@ type claudeSetupTokenProber func(context.Context, *cliproxyauth.Auth) (int, http
 type setupTokenProbeError struct {
 	code     int
 	upstream int
+	body     string
 	msg      string
 }
 
 func (e setupTokenProbeError) Error() string   { return e.msg }
 func (e setupTokenProbeError) StatusCode() int { return e.code }
+
+// UpstreamStatus is the HTTP status Anthropic returned to the probe.
+func (e setupTokenProbeError) UpstreamStatus() int { return e.upstream }
+
+// UpstreamBody is Anthropic's raw error body for the probe.
+func (e setupTokenProbeError) UpstreamBody() string { return e.body }
 
 func (e *ClaudeExecutor) probeSetupToken(ctx context.Context, auth *cliproxyauth.Auth) (int, http.Header, error) {
 	if e.setupTokenProber != nil {
@@ -92,7 +99,11 @@ func (e *ClaudeExecutor) refreshSetupTokenByProbe(ctx context.Context, auth *cli
 		return auth, nil
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
 		log.Warnf("claude executor: setup-token probe rejected for %s (status %d)", auth.ID, status)
-		return nil, setupTokenProbeError{code: http.StatusUnauthorized, upstream: status, msg: fmt.Sprintf("claude setup-token probe rejected: status %d: %v", status, err)}
+		body := ""
+		if err != nil {
+			body = err.Error()
+		}
+		return nil, setupTokenProbeError{code: http.StatusUnauthorized, upstream: status, body: body, msg: fmt.Sprintf("claude setup-token probe rejected: status %d: %v", status, err)}
 	default:
 		return nil, fmt.Errorf("claude setup-token probe failed (status %d): %w", status, err)
 	}

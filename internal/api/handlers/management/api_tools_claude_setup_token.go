@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -44,25 +45,54 @@ func claudeSetupTokenUsageFallback(auth *coreauth.Auth, method string, target *u
 }
 
 // claudeSetupTokenUsageWithProbe answers a setup-token /api/oauth/usage query
-// without calling the endpoint (it always returns 403 for setup tokens). When
-// no quota observation exists yet, it forces one setup-token refresh probe
-// (throttled by the executor) and retries. ok=false keeps the legacy path.
+// without calling the endpoint (it always returns 403 for setup tokens).
+// It first runs the setup-token probe (a 1-token request, throttled by the
+// executor) so the panel never reports a cached quota as a successful refresh
+// for a token that no longer works: when Anthropic rejects the probe, the raw
+// upstream status and error body are returned unchanged, as the upstream
+// endpoint would for a dead credential. Only a working token gets the quota
+// rebuilt from observed rate-limit headers. ok=false keeps the legacy path.
 func (h *Handler) claudeSetupTokenUsageWithProbe(ctx context.Context, authIndex string, auth *coreauth.Auth, method string, target *url.URL) (apiCallResponse, bool) {
 	if auth == nil || !coreauth.IsClaudeSetupTokenAuth(auth) {
 		return apiCallResponse{}, false
-	}
-	if resp, ok := claudeSetupTokenUsageFallback(auth, method, target, http.StatusForbidden); ok {
-		return resp, true
 	}
 	if method != http.MethodGet || target == nil || !strings.EqualFold(target.Hostname(), "api.anthropic.com") || strings.TrimRight(target.Path, "/") != "/api/oauth/usage" {
 		return apiCallResponse{}, false
 	}
 	if h == nil || h.authManager == nil {
-		return apiCallResponse{}, false
+		return claudeSetupTokenUsageFallback(auth, method, target, http.StatusForbidden)
 	}
 	refreshed, err := h.authManager.ForceRefreshAuth(ctx, auth.ID)
-	if err != nil || refreshed == nil {
+	if err != nil {
+		if resp, ok := claudeSetupTokenProbeRejection(err); ok {
+			return resp, true
+		}
+		return apiCallResponse{}, false
+	}
+	if refreshed == nil {
 		return apiCallResponse{}, false
 	}
 	return claudeSetupTokenUsageFallback(refreshed, method, target, http.StatusForbidden)
+}
+
+// claudeSetupTokenProbeRejection turns a rejected setup-token probe into the
+// upstream answer: Anthropic's own status code and raw error body.
+func claudeSetupTokenProbeRejection(err error) (apiCallResponse, bool) {
+	var rejected interface {
+		UpstreamStatus() int
+		UpstreamBody() string
+	}
+	if !errors.As(err, &rejected) || rejected == nil {
+		return apiCallResponse{}, false
+	}
+	status := rejected.UpstreamStatus()
+	if status < 400 {
+		return apiCallResponse{}, false
+	}
+	body := strings.TrimSpace(rejected.UpstreamBody())
+	header := map[string][]string{claudeUsageQuotaSourceHeader: {"setup-token-probe"}}
+	if strings.HasPrefix(body, "{") {
+		header["Content-Type"] = []string{"application/json"}
+	}
+	return apiCallResponse{StatusCode: status, Header: header, Body: body}, true
 }
