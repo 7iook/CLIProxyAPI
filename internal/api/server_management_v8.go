@@ -64,6 +64,9 @@ func (s *Server) registerManagementV8Routes() {
 	v8.PUT("/account-groups", s.mgmt.PutAccountGroups)
 	v8.POST("/account-groups/assign", s.mgmt.AssignAccountGroup)
 
+	v8.GET("/panel-preferences", s.mgmt.GetPanelPreferences)
+	v8.PUT("/panel-preferences", s.mgmt.PutPanelPreferences)
+
 	v8.GET("/plugins", s.mgmt.ListPlugins)
 	v8.DELETE("/plugins/:id", s.mgmt.DeletePlugin)
 	v8.GET("/plugins/store", s.mgmt.ListPluginStore)
