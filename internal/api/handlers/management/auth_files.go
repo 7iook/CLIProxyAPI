@@ -427,6 +427,16 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 			emailValue := gjson.GetBytes(data, "email").String()
 			fileData["type"] = typeValue
 			fileData["email"] = emailValue
+			if strings.EqualFold(strings.TrimSpace(typeValue), "claude") {
+				if raw := gjson.GetBytes(data, coreauth.ClaudeSetupTokenQuotaMetadataKey); raw.IsObject() {
+					var md map[string]any
+					if errSnap := json.Unmarshal([]byte(`{"`+coreauth.ClaudeSetupTokenQuotaMetadataKey+`":`+raw.Raw+`}`), &md); errSnap == nil {
+						if snapshot, okSnapshot := coreauth.ClaudeQuotaSnapshotFromMetadata(md); okSnapshot {
+							fileData["quota_snapshot"] = snapshot
+						}
+					}
+				}
+			}
 			if projectID := strings.TrimSpace(gjson.GetBytes(data, "project_id").String()); projectID != "" {
 				fileData["project_id"] = projectID
 			}
@@ -686,6 +696,11 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 	entry["failed"] = auth.Failed
 	entry["recent_requests"] = auth.RecentRequestsSnapshot(time.Now())
 	entry["quota"] = quotaObservationPayloadForProvider(auth.Provider, auth.Quota)
+	// quota_snapshot: last passively observed Claude subscription quota
+	// (memory/metadata only, never contacts upstream). Omitted when unknown.
+	if snapshot, okSnapshot := coreauth.ClaudeQuotaSnapshot(auth); okSnapshot {
+		entry["quota_snapshot"] = snapshot
+	}
 	if modelQuotas := modelQuotaObservationPayload(auth.Provider, auth.ModelStates); len(modelQuotas) > 0 {
 		entry["model_quotas"] = modelQuotas
 	}

@@ -17,9 +17,15 @@ import (
 // copy in the credential metadata so it survives a restart.
 
 // ClaudeSetupTokenQuotaMetadataKey is the auth metadata key holding the
-// last-known setup-token quota: {"captured_at": RFC3339, "windows":
+// last-known passive Claude quota: {"captured_at": RFC3339, "windows":
 // {"five_hour": {"utilization": 0-100, "resets_at": RFC3339|null}, ...}}.
+// Despite its historical name it is written for every Claude subscription
+// credential (setup-token and OAuth) so existing files stay compatible.
 const ClaudeSetupTokenQuotaMetadataKey = "setup_token_quota"
+
+// ClaudeQuotaSnapshotSourcePassive marks a quota snapshot derived from the
+// unified rate-limit headers of real upstream traffic (no extra request).
+const ClaudeQuotaSnapshotSourcePassive = "passive"
 
 const (
 	// setupTokenQuotaMinWriteInterval bounds metadata writes caused only by a
@@ -93,6 +99,24 @@ func IsClaudeSetupTokenAuth(auth *Auth) bool {
 		token, _ = auth.Metadata["access_token"].(string)
 	}
 	return IsClaudeSetupTokenCredential(auth, token)
+}
+
+// IsClaudeSubscriptionAuth reports whether auth is a Claude subscription
+// credential (OAuth or setup-token, bearer sk-ant-oat...). Those receive
+// Anthropic-Ratelimit-Unified-* headers on every /v1/messages response.
+// Console API keys (sk-ant-api...) are excluded.
+func IsClaudeSubscriptionAuth(auth *Auth) bool {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
+		return false
+	}
+	token := ""
+	if auth.Attributes != nil {
+		token = auth.Attributes["api_key"]
+	}
+	if token == "" {
+		token, _ = auth.Metadata["access_token"].(string)
+	}
+	return strings.Contains(token, "sk-ant-oat")
 }
 
 func quotaFromSignals(signals map[string]string, observedAt time.Time) (setupTokenQuota, bool) {
@@ -199,11 +223,12 @@ func setupTokenQuotaWorthWriting(prev, next setupTokenQuota, havePrev bool) bool
 }
 
 // syncClaudeSetupTokenQuotaMetadata copies the live quota observation of a
-// setup-token auth into its metadata when worth persisting. The caller holds
+// Claude subscription auth (setup-token or OAuth) into its metadata when worth
+// persisting. The caller holds
 // the manager lock and persists the auth afterwards. The metadata map is
 // replaced, not mutated, because clones may share readers.
 func syncClaudeSetupTokenQuotaMetadata(auth *Auth) bool {
-	if !IsClaudeSetupTokenAuth(auth) || auth.Quota.ObservedAt.IsZero() {
+	if !IsClaudeSubscriptionAuth(auth) || auth.Quota.ObservedAt.IsZero() {
 		return false
 	}
 	next, ok := quotaFromSignals(auth.Quota.Signals, auth.Quota.ObservedAt)
@@ -231,10 +256,7 @@ func ClaudeSetupTokenUsageJSON(auth *Auth, now time.Time) ([]byte, bool) {
 	if !IsClaudeSetupTokenAuth(auth) {
 		return nil, false
 	}
-	q, ok := quotaFromMetadata(auth.Metadata)
-	if live, okLive := quotaFromSignals(auth.Quota.Signals, auth.Quota.ObservedAt); okLive && !auth.Quota.ObservedAt.IsZero() && (!ok || live.CapturedAt.After(q.CapturedAt)) {
-		q, ok = live, true
-	}
+	q, ok := latestClaudeQuota(auth)
 	if !ok {
 		return nil, false
 	}
@@ -252,6 +274,52 @@ func ClaudeSetupTokenUsageJSON(auth *Auth, now time.Time) ([]byte, bool) {
 	}
 	body, err := json.Marshal(out)
 	return body, err == nil
+}
+
+// latestClaudeQuota returns the newest known quota of a Claude subscription
+// auth: the live observation when newer than the persisted copy.
+func latestClaudeQuota(auth *Auth) (setupTokenQuota, bool) {
+	q, ok := quotaFromMetadata(auth.Metadata)
+	if live, okLive := quotaFromSignals(auth.Quota.Signals, auth.Quota.ObservedAt); okLive && !auth.Quota.ObservedAt.IsZero() && (!ok || live.CapturedAt.After(q.CapturedAt)) {
+		q, ok = live, true
+	}
+	return q, ok
+}
+
+// ClaudeQuotaSnapshot returns the last passively observed quota of a Claude
+// subscription credential for display:
+//
+//	{"captured_at": RFC3339, "source": "passive",
+//	 "windows": {"five_hour": {"utilization": 0-100, "resets_at": RFC3339|null}, ...}}
+//
+// Values are reported exactly as last observed; a resets_at in the past means
+// the window has rolled over since captured_at. It reads memory only and never
+// contacts upstream.
+func ClaudeQuotaSnapshot(auth *Auth) (map[string]any, bool) {
+	if !IsClaudeSubscriptionAuth(auth) {
+		return nil, false
+	}
+	q, ok := latestClaudeQuota(auth)
+	if !ok {
+		return nil, false
+	}
+	return q.snapshotValue(), true
+}
+
+// ClaudeQuotaSnapshotFromMetadata builds the same snapshot from raw auth file
+// metadata (used when no auth manager is available).
+func ClaudeQuotaSnapshotFromMetadata(md map[string]any) (map[string]any, bool) {
+	q, ok := quotaFromMetadata(md)
+	if !ok {
+		return nil, false
+	}
+	return q.snapshotValue(), true
+}
+
+func (q setupTokenQuota) snapshotValue() map[string]any {
+	out := q.metadataValue()
+	out["source"] = ClaudeQuotaSnapshotSourcePassive
+	return out
 }
 
 // claudeSetupTokenNextProbeAt returns when a setup-token credential is next due

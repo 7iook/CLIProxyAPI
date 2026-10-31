@@ -76,8 +76,13 @@ func TestClaudeSetupTokenUsageExpiredWindowIsReset(t *testing.T) {
 func TestClaudeSetupTokenUsageNonSetupTokenUntouched(t *testing.T) {
 	signals := map[string]string{"Anthropic-Ratelimit-Unified-5h-Utilization": "0.2"}
 	now := time.Now()
+	// OAuth credentials get a passive snapshot (see TestClaudeOAuthQuotaSnapshot)
+	// but never the setup-token usage substitute: they read /api/oauth/usage.
+	oauth := &Auth{ID: "oauth", Provider: "claude", Metadata: map[string]any{"access_token": "sk-ant-oat01-y", "scope": "user:profile user:inference"}, Quota: QuotaState{ObservedAt: now, Signals: signals}}
+	if _, ok := ClaudeSetupTokenUsageJSON(oauth, now); ok {
+		t.Fatal("unexpected setup-token usage for OAuth credential")
+	}
 	for _, a := range []*Auth{
-		{ID: "oauth", Provider: "claude", Metadata: map[string]any{"access_token": "sk-ant-oat01-y", "scope": "user:profile user:inference"}},
 		{ID: "key", Provider: "claude", Attributes: map[string]string{"api_key": "sk-ant-api03-z"}},
 		{ID: "codex", Provider: "codex", Metadata: map[string]any{"access_token": "sk-ant-oat01-w", "is_setup_token": true}},
 		nil,
@@ -144,5 +149,74 @@ func TestMarkResultSyncsSetupTokenQuotaMetadata(t *testing.T) {
 	w := raw["windows"].(map[string]any)["five_hour"].(map[string]any)
 	if w["utilization"].(float64) != 30 || w["resets_at"] != "2100-01-01T00:00:00Z" {
 		t.Fatalf("window = %v", w)
+	}
+}
+
+func TestClaudeOAuthQuotaSnapshot(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	oauth := &Auth{ID: "bue", Provider: "claude", Metadata: map[string]any{"type": "claude", "access_token": "sk-ant-oat01-y", "refresh_token": "r", "scope": "user:profile user:inference"}}
+	auth, err := manager.Register(context.Background(), oauth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ClaudeQuotaSnapshot(auth); ok {
+		t.Fatal("snapshot before any traffic")
+	}
+	ctx := internallogging.WithResponseHeadersHolder(context.Background())
+	internallogging.SetResponseHeaders(ctx, http.Header{
+		"Anthropic-Ratelimit-Unified-5h-Utilization": {"0.2"},
+		"Anthropic-Ratelimit-Unified-5h-Reset":       {"4102444800"},
+		"Anthropic-Ratelimit-Unified-7d-Utilization": {"0.05"},
+	})
+	manager.MarkResult(ctx, Result{AuthID: auth.ID, Provider: "claude", Model: "claude-sonnet-4-5", Success: true})
+	updated, _ := manager.GetByID(auth.ID)
+	if _, ok := updated.Metadata[ClaudeSetupTokenQuotaMetadataKey].(map[string]any); !ok {
+		t.Fatalf("OAuth quota not persisted: %#v", updated.Metadata)
+	}
+	snap, ok := ClaudeQuotaSnapshot(updated)
+	if !ok {
+		t.Fatal("no snapshot")
+	}
+	if snap["source"] != "passive" {
+		t.Fatalf("source = %v", snap["source"])
+	}
+	if _, errParse := time.Parse(time.RFC3339, snap["captured_at"].(string)); errParse != nil {
+		t.Fatalf("captured_at = %v", snap["captured_at"])
+	}
+	windows := snap["windows"].(map[string]any)
+	fh := windows["five_hour"].(map[string]any)
+	if fh["utilization"].(float64) != 20 || fh["resets_at"] != "2100-01-01T00:00:00Z" {
+		t.Fatalf("five_hour = %v", fh)
+	}
+	sd := windows["seven_day"].(map[string]any)
+	if sd["utilization"].(float64) != 5 || sd["resets_at"] != nil {
+		t.Fatalf("seven_day = %v", sd)
+	}
+	for _, a := range []*Auth{
+		{ID: "key", Provider: "claude", Attributes: map[string]string{"api_key": "sk-ant-api03-z"}},
+		{ID: "codex", Provider: "codex", Metadata: map[string]any{"access_token": "sk-ant-oat01-w"}},
+	} {
+		a.Quota = QuotaState{ObservedAt: time.Now(), Signals: map[string]string{"Anthropic-Ratelimit-Unified-5h-Utilization": "0.2"}}
+		if _, ok := ClaudeQuotaSnapshot(a); ok {
+			t.Fatalf("unexpected snapshot for %s", a.ID)
+		}
+	}
+}
+
+func TestClaudeQuotaSnapshotPrefersNewerLiveObservation(t *testing.T) {
+	old := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	a := setupTokenAuth("st")
+	a.Metadata[ClaudeSetupTokenQuotaMetadataKey] = map[string]any{
+		"captured_at": old.Format(time.RFC3339),
+		"windows":     map[string]any{"five_hour": map[string]any{"utilization": 10.0, "resets_at": nil}},
+	}
+	snap, ok := ClaudeQuotaSnapshot(a)
+	if !ok || snap["windows"].(map[string]any)["five_hour"].(map[string]any)["utilization"].(float64) != 10 {
+		t.Fatalf("persisted snapshot = %v", snap)
+	}
+	a.Quota = QuotaState{ObservedAt: time.Now(), Signals: map[string]string{"Anthropic-Ratelimit-Unified-5h-Utilization": "0.55"}}
+	snap, _ = ClaudeQuotaSnapshot(a)
+	if snap["windows"].(map[string]any)["five_hour"].(map[string]any)["utilization"].(float64) != 55 {
+		t.Fatalf("live snapshot = %v", snap)
 	}
 }
