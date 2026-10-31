@@ -698,6 +698,9 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 			entry["quota_probe"] = probe
 		}
 	}
+	if ui := uiEchoPayload(auth.Metadata); ui != nil {
+		entry["ui"] = ui
+	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email
 	}
