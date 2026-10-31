@@ -54,6 +54,10 @@ type Config struct {
 	// Plugins configures dynamic plugin discovery and per-plugin settings.
 	Plugins PluginsConfig `yaml:"plugins" json:"plugins"`
 
+	// AccountGroups is the ordered, display-only registry of credential groups for the management panel.
+	// It never influences scheduling, selection, priority or weight.
+	AccountGroups []AccountGroup `yaml:"account-groups,omitempty" json:"account-groups,omitempty"`
+
 	// AuthDir is the directory where authentication token files are stored.
 	AuthDir string `yaml:"auth-dir" json:"-"`
 
