@@ -287,6 +287,12 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 	}
 
 	if !shouldRefresh {
+		// nextRefreshCheckAt and shouldRefresh can disagree (e.g. a setup-token
+		// probe that is overdue while a runtime evaluator vetoes it). Never
+		// requeue at "now", or the scheduler spins and floods the logs.
+		if !next.After(now) {
+			next = now.Add(l.interval)
+		}
 		l.upsert(authID, next)
 		return
 	}

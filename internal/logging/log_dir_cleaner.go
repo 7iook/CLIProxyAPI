@@ -162,5 +162,18 @@ func isLogFileName(name string) bool {
 		return false
 	}
 	lower := strings.ToLower(trimmed)
+	if _, external := externalLogFiles[lower]; external {
+		return false
+	}
 	return strings.HasSuffix(lower, ".log") || strings.HasSuffix(lower, ".log.gz")
+}
+
+// externalLogFiles are written into the logs directory by deployment scripts
+// (watchdog, tunnel, resume tracking); they rotate themselves and must never be
+// deleted by the size-based cleaner, or a log burst wipes the ops history.
+var externalLogFiles = map[string]struct{}{
+	"watchdog.log":      {},
+	"tunnel.log":        {},
+	"resume-events.log": {},
+	"boot.log":          {},
 }
