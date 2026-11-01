@@ -21,6 +21,7 @@ import (
 	metaauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/meta"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v8/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/misc"
+	helps "github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -162,7 +163,11 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 		// Create token storage
 		tokenStorage := anthropicAuth.CreateTokenStorage(bundle)
-		metadata := map[string]any{"email": tokenStorage.Email}
+		// Explicitly stamp is_setup_token:false so a normal OAuth login that
+		// overwrites a prior setup-token file for the same identity clears the
+		// stale marker. MergeExistingAuthMetadata only inherits keys the new
+		// record does not define, so the explicit false wins over inheritance.
+		metadata := map[string]any{"email": tokenStorage.Email, "is_setup_token": false}
 		if tokenStorage.AccountUUID != "" {
 			metadata["account_uuid"] = tokenStorage.AccountUUID
 		}
@@ -198,6 +203,189 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		if bundle.APIKey != "" {
 			fmt.Println("API key obtained and saved")
 		}
+		fmt.Println("You can now use Claude services through this CLI")
+		CompleteOAuthSession(state)
+	}()
+
+	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
+}
+
+// RequestClaudeSetupToken runs the Claude `setup-token` authorization flow: an
+// inference-only OAuth grant that yields a long-lived sk-ant-oat01- token. It
+// reuses the Anthropic PKCE/state/callback skeleton but requests the
+// user:inference scope with expires_in=31536000, skips the profile/roles
+// companion lookups (403 for this scope), and persists the credential with an
+// explicit is_setup_token marker so the runtime drives it down the probe
+// refresh path.
+func (h *Handler) RequestClaudeSetupToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing Claude setup-token authentication...")
+
+	pkceCodes, err := claude.GeneratePKCECodes()
+	if err != nil {
+		log.Errorf("Failed to generate PKCE codes: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PKCE codes"})
+		return
+	}
+
+	state, err := misc.GenerateRandomState()
+	if err != nil {
+		log.Errorf("Failed to generate state parameter: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
+		return
+	}
+
+	sessionProxyURL := oauthSessionProxyURLFromContext(c)
+	cfg := h.oauthConfigWithProxy(sessionProxyURL)
+	anthropicAuth := claude.NewClaudeAuthWithProxyURL(cfg, sessionProxyURL)
+
+	setupOpts := claude.ClaudeAuthOptions{
+		Scope:              claude.SetupTokenScope,
+		ExpiresIn:          claude.SetupTokenExpiresInSeconds,
+		SkipAccountProfile: true,
+	}
+
+	authURL, state, err := anthropicAuth.GenerateAuthURLWithOptions(state, pkceCodes, setupOpts)
+	if err != nil {
+		log.Errorf("Failed to generate authorization URL: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
+		return
+	}
+
+	RegisterOAuthSessionWithProxy(state, "anthropic", sessionProxyURL)
+
+	isWebUI := isWebUIRequest(c)
+	var forwarder *callbackForwarder
+	if isWebUI {
+		targetURL, errTarget := h.managementCallbackURL("/anthropic/callback")
+		if errTarget != nil {
+			log.WithError(errTarget).Error("failed to compute anthropic callback target")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
+			return
+		}
+		var errStart error
+		if forwarder, errStart = startCallbackForwarder(anthropicCallbackPort, "anthropic", targetURL); errStart != nil {
+			log.WithError(errStart).Error("failed to start anthropic callback forwarder")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
+			return
+		}
+	}
+
+	go func() {
+		if isWebUI {
+			defer stopCallbackForwarderInstance(anthropicCallbackPort, forwarder)
+		}
+
+		waitFile := filepath.Join(cfg.AuthDir, fmt.Sprintf(".oauth-anthropic-%s.oauth", state))
+		waitForFile := func(path string, timeout time.Duration) (map[string]string, error) {
+			deadline := time.Now().Add(timeout)
+			for {
+				if !IsOAuthSessionPending(state, "anthropic") {
+					return nil, errOAuthSessionNotPending
+				}
+				if time.Now().After(deadline) {
+					SetOAuthSessionError(state, "Timeout waiting for OAuth callback")
+					return nil, fmt.Errorf("timeout waiting for OAuth callback")
+				}
+				data, errRead := os.ReadFile(path)
+				if errRead == nil {
+					var m map[string]string
+					_ = json.Unmarshal(data, &m)
+					_ = os.Remove(path)
+					return m, nil
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+		}
+
+		fmt.Println("Waiting for setup-token authentication callback...")
+		resultMap, errWait := waitForFile(waitFile, 5*time.Minute)
+		if errWait != nil {
+			if errors.Is(errWait, errOAuthSessionNotPending) {
+				return
+			}
+			authErr := claude.NewAuthenticationError(claude.ErrCallbackTimeout, errWait)
+			log.Error(claude.GetUserFriendlyMessage(authErr))
+			return
+		}
+		if errStr := resultMap["error"]; errStr != "" {
+			oauthErr := claude.NewOAuthError(errStr, "", http.StatusBadRequest)
+			log.Error(claude.GetUserFriendlyMessage(oauthErr))
+			SetOAuthSessionError(state, "Bad request")
+			return
+		}
+		if resultMap["state"] != state {
+			authErr := claude.NewAuthenticationError(claude.ErrInvalidState, fmt.Errorf("expected %s, got %s", state, resultMap["state"]))
+			log.Error(claude.GetUserFriendlyMessage(authErr))
+			SetOAuthSessionError(state, "State code error")
+			return
+		}
+
+		rawCode := resultMap["code"]
+		code := strings.Split(rawCode, "#")[0]
+
+		bundle, errExchange := anthropicAuth.ExchangeCodeForTokensWithOptions(ctx, code, state, pkceCodes, setupOpts)
+		if errExchange != nil {
+			authErr := claude.NewAuthenticationError(claude.ErrCodeExchangeFailed, errExchange)
+			log.Errorf("Failed to exchange authorization code for setup token: %s", redactSessionProxyInString(authErr.Error(), sessionProxyURL))
+			SetOAuthSessionError(state, "Failed to exchange authorization code for tokens")
+			return
+		}
+
+		tokenStorage := anthropicAuth.CreateTokenStorage(bundle)
+		// A setup token has no profile scope, so the exchange leaves account
+		// identity empty. Seed a stable per-credential account from the token so
+		// distinct setup tokens never collapse onto the same claude-.json file.
+		// The seed must be byte-identical to the executor PrepareRequestAuth
+		// fallback (claude_executor_auth.go) so both paths derive the same
+		// account UUID for the same token (single source of truth).
+		if strings.TrimSpace(tokenStorage.Email) == "" && strings.TrimSpace(tokenStorage.AccountUUID) == "" && strings.TrimSpace(tokenStorage.OrganizationUUID) == "" {
+			tokenStorage.AccountUUID = helps.StableClaudeCLIAccountUUID("claude-setup-token|" + tokenStorage.AccessToken)
+		}
+
+		// Explicitly mark the credential as a setup token (and clear auth_kind
+		// inheritance) so IsClaudeSetupTokenCredential recognises it and the
+		// runtime drives it down the probe refresh path.
+		metadata := map[string]any{
+			"email":          tokenStorage.Email,
+			"is_setup_token": true,
+			"auth_kind":      "setup_token",
+		}
+		if tokenStorage.AccountUUID != "" {
+			metadata["account_uuid"] = tokenStorage.AccountUUID
+		}
+		if tokenStorage.OrganizationUUID != "" {
+			metadata["organization_uuid"] = tokenStorage.OrganizationUUID
+		}
+		if tokenStorage.OrganizationName != "" {
+			metadata["organization_name"] = tokenStorage.OrganizationName
+		}
+		if len(tokenStorage.DeviceIDs) > 0 {
+			metadata[claude.ClaudeDeviceIDsMetadataKey] = append([]string(nil), tokenStorage.DeviceIDs...)
+		}
+		fileName := claude.CredentialFileName(tokenStorage.Email, tokenStorage.OrganizationUUID, tokenStorage.AccountUUID)
+		record := &coreauth.Auth{
+			ID:         fileName,
+			Provider:   "claude",
+			FileName:   fileName,
+			Storage:    tokenStorage,
+			Metadata:   metadata,
+			Attributes: map[string]string{"auth_kind": "setup_token"},
+		}
+		applySessionProxyToAuthRecord(record, sessionProxyURL)
+		if errGuard := claimOAuthSessionCommit(state, "anthropic"); errGuard != nil {
+			return
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save setup token: %v", errSave)
+			FailOAuthSessionCommit(state, "Failed to save authentication tokens")
+			return
+		}
+
+		fmt.Printf("Setup-token authentication successful! Token saved to %s\n", savedPath)
 		fmt.Println("You can now use Claude services through this CLI")
 		CompleteOAuthSession(state)
 	}()

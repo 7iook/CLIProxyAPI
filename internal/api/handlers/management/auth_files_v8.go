@@ -351,6 +351,8 @@ func (h *Handler) StartOAuthV8(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "provider is required"})
 	case "claude":
 		h.RequestAnthropicToken(c)
+	case "claude-setup-token":
+		h.RequestClaudeSetupToken(c)
 	case "codex":
 		h.RequestCodexToken(c)
 	case "antigravity":

@@ -34,6 +34,17 @@ const (
 	RedirectURI      = "http://localhost:54545/callback"
 	ClaudeOAuthScope = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 
+	// SetupTokenScope is the inference-only scope requested by `claude
+	// setup-token`. It deliberately omits user:profile, so the resulting
+	// sk-ant-oat01- token cannot read the OAuth profile/roles endpoints.
+	SetupTokenScope = "user:inference"
+	// SetupTokenExpiresInSeconds is the long-lived setup-token lifetime
+	// (365 days) requested in the authorization-code exchange.
+	SetupTokenExpiresInSeconds = 31536000
+	// ManualRedirectURI is the out-of-band redirect the setup-token flow uses
+	// when no local callback server is available.
+	ManualRedirectURI = "https://platform.claude.com/oauth/code/callback"
+
 	claudeRefreshMinBackoff       = 5 * time.Second
 	claudeRefreshMaxBackoff       = 5 * time.Minute
 	claudeRefreshTimeout          = 30 * time.Second
@@ -154,6 +165,25 @@ type authorizationCodeExchangeRequest struct {
 	ClientID     string `json:"client_id"`
 	CodeVerifier string `json:"code_verifier"`
 	State        string `json:"state"`
+	ExpiresIn    int    `json:"expires_in,omitempty"`
+}
+
+// ClaudeAuthOptions carries the setup-token flow overrides for the OAuth
+// authorization URL and token exchange. A zero value reproduces the normal
+// Claude Code OAuth login byte-for-byte.
+type ClaudeAuthOptions struct {
+	// Scope overrides ClaudeOAuthScope on the authorization URL when non-empty.
+	Scope string
+	// RedirectURI overrides the RedirectURI constant on both the authorization
+	// URL and the token exchange body when non-empty.
+	RedirectURI string
+	// ExpiresIn, when positive, is sent as expires_in in the token exchange to
+	// request a long-lived setup token.
+	ExpiresIn int
+	// SkipAccountProfile suppresses the post-exchange profile/roles companion
+	// lookups. An inference-only setup token cannot read those endpoints (403),
+	// so the flow must not attempt them.
+	SkipAccountProfile bool
 }
 
 // OAuthProfile is the account identity returned by Anthropic's OAuth profile endpoint.
@@ -292,6 +322,16 @@ func (o *ClaudeAuth) FetchOAuthRoles(ctx context.Context, accessToken string) (j
 	return json.RawMessage(body), nil
 }
 
+// maybeInspectOAuthAccount runs inspectOAuthAccount unless skip is set. The
+// setup-token flow sets skip because its inference-only token cannot read the
+// profile/roles endpoints.
+func (o *ClaudeAuth) maybeInspectOAuthAccount(ctx context.Context, accessToken string, skip bool) *OAuthProfile {
+	if skip {
+		return nil
+	}
+	return o.inspectOAuthAccount(ctx, accessToken)
+}
+
 // inspectOAuthAccount replays the login companion control-plane calls the native
 // client makes within roughly 500ms of a successful token exchange: the account
 // profile lookup followed by the claude_cli roles lookup. Both are advisory, so
@@ -321,16 +361,32 @@ func (o *ClaudeAuth) inspectOAuthAccount(ctx context.Context, accessToken string
 //   - string: The state parameter for verification
 //   - error: An error if PKCE codes are missing or URL generation fails
 func (o *ClaudeAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string, string, error) {
+	return o.GenerateAuthURLWithOptions(state, pkceCodes, ClaudeAuthOptions{})
+}
+
+// GenerateAuthURLWithOptions creates the OAuth authorization URL with PKCE,
+// applying the setup-token overrides in opts. A zero opts reproduces the normal
+// Claude Code login URL byte-for-byte.
+func (o *ClaudeAuth) GenerateAuthURLWithOptions(state string, pkceCodes *PKCECodes, opts ClaudeAuthOptions) (string, string, error) {
 	if pkceCodes == nil {
 		return "", "", fmt.Errorf("PKCE codes are required")
+	}
+
+	scope := ClaudeOAuthScope
+	if strings.TrimSpace(opts.Scope) != "" {
+		scope = opts.Scope
+	}
+	redirectURI := RedirectURI
+	if strings.TrimSpace(opts.RedirectURI) != "" {
+		redirectURI = opts.RedirectURI
 	}
 
 	params := url.Values{
 		"code":                  {"true"},
 		"client_id":             {ClientID},
 		"response_type":         {"code"},
-		"redirect_uri":          {RedirectURI},
-		"scope":                 {ClaudeOAuthScope},
+		"redirect_uri":          {redirectURI},
+		"scope":                 {scope},
 		"code_challenge":        {pkceCodes.CodeChallenge},
 		"code_challenge_method": {"S256"},
 		"state":                 {state},
@@ -372,10 +428,25 @@ func (c *ClaudeAuth) parseCodeAndState(code string) (parsedCode, parsedState str
 //   - *ClaudeAuthBundle: The complete authentication bundle with tokens
 //   - error: An error if token exchange fails
 func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state string, pkceCodes *PKCECodes) (*ClaudeAuthBundle, error) {
+	return o.ExchangeCodeForTokensWithOptions(ctx, code, state, pkceCodes, ClaudeAuthOptions{})
+}
+
+// ExchangeCodeForTokensWithOptions exchanges an authorization code for tokens,
+// applying the setup-token overrides in opts: a positive opts.ExpiresIn is sent
+// as expires_in to request a long-lived token, opts.RedirectURI overrides the
+// redirect, and opts.SkipAccountProfile suppresses the profile/roles companion
+// lookups that an inference-only token cannot perform. A zero opts reproduces
+// the normal Claude Code exchange byte-for-byte.
+func (o *ClaudeAuth) ExchangeCodeForTokensWithOptions(ctx context.Context, code, state string, pkceCodes *PKCECodes, opts ClaudeAuthOptions) (*ClaudeAuthBundle, error) {
 	if pkceCodes == nil {
 		return nil, fmt.Errorf("PKCE codes are required for token exchange")
 	}
 	newCode, newState := o.parseCodeAndState(code)
+
+	redirectURI := RedirectURI
+	if strings.TrimSpace(opts.RedirectURI) != "" {
+		redirectURI = opts.RedirectURI
+	}
 
 	// Prepare token exchange request. The struct field order reproduces the key
 	// order Claude Code 2.1.220 emits on the wire; a map would be re-sorted
@@ -383,10 +454,13 @@ func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state stri
 	reqBody := authorizationCodeExchangeRequest{
 		GrantType:    "authorization_code",
 		Code:         newCode,
-		RedirectURI:  RedirectURI,
+		RedirectURI:  redirectURI,
 		ClientID:     ClientID,
 		CodeVerifier: pkceCodes.CodeVerifier,
 		State:        state,
+	}
+	if opts.ExpiresIn > 0 {
+		reqBody.ExpiresIn = opts.ExpiresIn
 	}
 
 	// A state fragment appended to the callback code takes precedence.
@@ -450,8 +524,9 @@ func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state stri
 	}
 
 	// Replay the native login companion lookups and let the profile response win
-	// where it carries identity the token response omitted.
-	if profile := o.inspectOAuthAccount(ctx, tokenResp.AccessToken); profile != nil {
+	// where it carries identity the token response omitted. An inference-only
+	// setup token has no profile scope, so these lookups 403 and are skipped.
+	if profile := o.maybeInspectOAuthAccount(ctx, tokenResp.AccessToken, opts.SkipAccountProfile); profile != nil {
 		if value := strings.TrimSpace(profile.Account.UUID); value != "" {
 			tokenData.AccountUUID = value
 		}
