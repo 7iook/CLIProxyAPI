@@ -210,6 +210,16 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
+// claudeSetupTokenAccountSeedString builds the seed string used to derive a
+// setup token's fallback account identity. It must stay byte-identical to the
+// executor PrepareRequestAuth fallback (claude_executor_auth.go) so that, if a
+// setup-token credential ever reaches the runtime without a persisted
+// account_uuid, both paths derive the same account UUID instead of forking the
+// credential's identity.
+func claudeSetupTokenAccountSeedString(accessToken string) string {
+	return "claude-setup-token|" + accessToken
+}
+
 // RequestClaudeSetupToken runs the Claude `setup-token` authorization flow: an
 // inference-only OAuth grant that yields a long-lived sk-ant-oat01- token. It
 // reuses the Anthropic PKCE/state/callback skeleton but requests the
@@ -342,7 +352,7 @@ func (h *Handler) RequestClaudeSetupToken(c *gin.Context) {
 		// fallback (claude_executor_auth.go) so both paths derive the same
 		// account UUID for the same token (single source of truth).
 		if strings.TrimSpace(tokenStorage.Email) == "" && strings.TrimSpace(tokenStorage.AccountUUID) == "" && strings.TrimSpace(tokenStorage.OrganizationUUID) == "" {
-			tokenStorage.AccountUUID = helps.StableClaudeCLIAccountUUID("claude-setup-token|" + tokenStorage.AccessToken)
+			tokenStorage.AccountUUID = helps.StableClaudeCLIAccountUUID(claudeSetupTokenAccountSeedString(tokenStorage.AccessToken))
 		}
 
 		// Explicitly mark the credential as a setup token (and clear auth_kind

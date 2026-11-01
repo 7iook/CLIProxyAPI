@@ -41,9 +41,6 @@ const (
 	// SetupTokenExpiresInSeconds is the long-lived setup-token lifetime
 	// (365 days) requested in the authorization-code exchange.
 	SetupTokenExpiresInSeconds = 31536000
-	// ManualRedirectURI is the out-of-band redirect the setup-token flow uses
-	// when no local callback server is available.
-	ManualRedirectURI = "https://platform.claude.com/oauth/code/callback"
 
 	claudeRefreshMinBackoff       = 5 * time.Second
 	claudeRefreshMaxBackoff       = 5 * time.Minute
