@@ -343,11 +343,17 @@ func (l *authAutoRefreshLoop) applyDirty(now time.Time) {
 		l.manager.mu.RLock()
 		auth := l.manager.auths[authID]
 		next, ok := nextRefreshCheckAt(now, auth, l.interval)
+		vetoed := ok && !next.After(now) && !l.manager.shouldRefresh(auth, now)
 		l.manager.mu.RUnlock()
 
 		if !ok {
 			l.remove(authID)
 			continue
+		}
+		if vetoed {
+			// Same disagreement as in handleDueAuth: an auth touched every cycle
+			// (e.g. passive quota updates) must not be re-queued at "now".
+			next = now.Add(l.interval)
 		}
 		l.upsert(authID, next)
 	}
