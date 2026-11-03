@@ -57,3 +57,34 @@ func TestSaveTokenToFile_PreservesCustomMetadata(t *testing.T) {
 		t.Errorf("weight = %v, want 5", saved["weight"])
 	}
 }
+
+func TestSaveTokenToFile_PreservesSubscriptionMetadata(t *testing.T) {
+	authFilePath := filepath.Join(t.TempDir(), "claude-sub.json")
+	storage := &ClaudeTokenStorage{
+		Type:         "claude",
+		Email:        "user@example.com",
+		AccessToken:  "refreshed-access",
+		RefreshToken: "refreshed-refresh",
+	}
+	storage.SetMetadata(map[string]any{
+		"subscription": map[string]any{"start": "2026-11-03", "cycle": "monthly", "auto_renew": false},
+	})
+	if errSave := storage.SaveTokenToFile(authFilePath); errSave != nil {
+		t.Fatalf("SaveTokenToFile() error = %v", errSave)
+	}
+	savedRaw, errRead := os.ReadFile(authFilePath)
+	if errRead != nil {
+		t.Fatalf("os.ReadFile error = %v", errRead)
+	}
+	var saved map[string]any
+	if errUnmarshal := json.Unmarshal(savedRaw, &saved); errUnmarshal != nil {
+		t.Fatalf("json.Unmarshal error = %v", errUnmarshal)
+	}
+	sub, ok := saved["subscription"].(map[string]any)
+	if !ok || sub["start"] != "2026-11-03" || sub["cycle"] != "monthly" || sub["auto_renew"] != false {
+		t.Fatalf("subscription = %#v, want preserved object", saved["subscription"])
+	}
+	if saved["access_token"] != "refreshed-access" {
+		t.Fatalf("access_token = %v, want refreshed-access", saved["access_token"])
+	}
+}

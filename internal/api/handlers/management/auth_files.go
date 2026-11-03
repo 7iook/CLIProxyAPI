@@ -798,6 +798,11 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quota authFileQu
 			}
 		}
 	}
+	// subscription: manually maintained subscription dates plus the computed
+	// current period (Asia/Shanghai calendar days). Omitted when unset.
+	if subscription, ok := authFileSubscriptionPayload(auth.Metadata, time.Now()); ok {
+		entry[authFileSubscriptionKey] = subscription
+	}
 	if weight, ok := authWeightValue(auth); ok {
 		entry[coreauth.AttributeWeight] = weight
 	}

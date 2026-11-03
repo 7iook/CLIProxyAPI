@@ -1512,3 +1512,150 @@ func mustGetAuthByID(t *testing.T, manager *coreauth.Manager, id string) *coreau
 	}
 	return got
 }
+
+func newSubscriptionPatchFixture(t *testing.T) (*Handler, *coreauth.Manager, string) {
+	t.Helper()
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	authDir := t.TempDir()
+	fileName := "claude-sub.json"
+	filePath := filepath.Join(authDir, fileName)
+	store := fileauth.NewFileTokenStore()
+	store.SetBaseDir(authDir)
+	manager := coreauth.NewManager(store, nil, nil)
+	record := &coreauth.Auth{
+		ID:         fileName,
+		FileName:   fileName,
+		Provider:   "claude",
+		Attributes: map[string]string{"path": filePath},
+		Metadata:   map[string]any{"type": "claude", "note": "keep-me"},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	return NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager), manager, filePath
+}
+
+func patchSubscriptionFields(t *testing.T, h *Handler, fields string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	body := `{"name":"claude-sub.json",` + fields + `}`
+	ctx.Request = httptest.NewRequest(http.MethodPatch, "/v0/management/auth-files/fields", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	h.PatchAuthFileFields(ctx)
+	return rec
+}
+
+func readSubscriptionAuthFile(t *testing.T, path string) map[string]any {
+	t.Helper()
+	raw, errRead := os.ReadFile(path)
+	if errRead != nil {
+		t.Fatalf("ReadFile() error = %v", errRead)
+	}
+	var data map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &data); errUnmarshal != nil {
+		t.Fatalf("Unmarshal() error = %v", errUnmarshal)
+	}
+	return data
+}
+
+func TestPatchAuthFileFields_SubscriptionPersistsAndEchoes(t *testing.T) {
+	h, manager, filePath := newSubscriptionPatchFixture(t)
+
+	rec := patchSubscriptionFields(t, h, `"subscription":{"start":"2026-11-03","cycle":"monthly","auto_renew":false,"end":null}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	data := readSubscriptionAuthFile(t, filePath)
+	sub, ok := data["subscription"].(map[string]any)
+	if !ok {
+		t.Fatalf("persisted subscription = %#v, want object", data["subscription"])
+	}
+	if sub["start"] != "2026-11-03" || sub["cycle"] != "monthly" || sub["auto_renew"] != false {
+		t.Fatalf("persisted subscription = %#v", sub)
+	}
+	if _, hasEnd := sub["end"]; hasEnd {
+		t.Fatalf("null end persisted as %#v, want omitted", sub["end"])
+	}
+	if data["note"] != "keep-me" {
+		t.Fatalf("note = %#v, want keep-me", data["note"])
+	}
+
+	// Nested field update keeps the other fields.
+	rec = patchSubscriptionFields(t, h, `"subscription.end":"2026-11-20","subscription.auto_renew":true`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("nested status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	sub = readSubscriptionAuthFile(t, filePath)["subscription"].(map[string]any)
+	if sub["start"] != "2026-11-03" || sub["end"] != "2026-11-20" || sub["auto_renew"] != true {
+		t.Fatalf("nested patch result = %#v", sub)
+	}
+
+	updated, _ := manager.GetByID("claude-sub.json")
+	entry := h.buildAuthFileEntry(updated, authFileQuotaContext{})
+	echo, ok := entry["subscription"].(map[string]any)
+	if !ok {
+		t.Fatalf("entry subscription = %#v, want object", entry["subscription"])
+	}
+	if echo["period_end"] != "2026-11-20" || echo["state"] == nil || echo["days_left"] == nil {
+		t.Fatalf("entry subscription echo = %#v", echo)
+	}
+}
+
+func TestPatchAuthFileFields_SubscriptionNullDeletes(t *testing.T) {
+	h, manager, filePath := newSubscriptionPatchFixture(t)
+	if rec := patchSubscriptionFields(t, h, `"subscription":{"start":"2026-11-03"}`); rec.Code != http.StatusOK {
+		t.Fatalf("set status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := patchSubscriptionFields(t, h, `"subscription":null`); rec.Code != http.StatusOK {
+		t.Fatalf("delete status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	data := readSubscriptionAuthFile(t, filePath)
+	if _, exists := data["subscription"]; exists {
+		t.Fatalf("subscription still persisted after null: %#v", data["subscription"])
+	}
+	if data["note"] != "keep-me" {
+		t.Fatalf("note = %#v, want keep-me", data["note"])
+	}
+	updated, _ := manager.GetByID("claude-sub.json")
+	if _, exists := updated.Metadata["subscription"]; exists {
+		t.Fatal("runtime metadata still has subscription")
+	}
+	if _, exists := h.buildAuthFileEntry(updated, authFileQuotaContext{})["subscription"]; exists {
+		t.Fatal("entry still echoes subscription after delete")
+	}
+}
+
+func TestPatchAuthFileFields_SubscriptionRejectsInvalid(t *testing.T) {
+	h, _, filePath := newSubscriptionPatchFixture(t)
+	if rec := patchSubscriptionFields(t, h, `"subscription":{"start":"2026-11-03"}`); rec.Code != http.StatusOK {
+		t.Fatalf("set status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	cases := []struct {
+		fields  string
+		wantMsg string
+	}{
+		{`"subscription":{"start":"2026-13-01"}`, "subscription.start must be a valid date"},
+		{`"subscription":{"cycle":"monthly"}`, "subscription.start is required"},
+		{`"subscription":{"start":"2026-11-03","cycle":"weekly"}`, "subscription.cycle must be"},
+		{`"subscription":{"start":"2026-11-03","auto_renew":1}`, "subscription.auto_renew must be a boolean"},
+		{`"subscription":"2026-11-03"`, "subscription must be an object or null"},
+		{`"subscription.end":"2026-11-99"`, "subscription.end must be a valid date"},
+		{`"subscription.start":null`, "subscription.start is required"},
+		{`"subscription.foo":1`, "subscription.foo is not a supported field"},
+		{`"subscription":{"start":"2026-11-03"},"subscription.end":"2026-12-01"`, "cannot be patched together"},
+	}
+	for _, tc := range cases {
+		rec := patchSubscriptionFields(t, h, tc.fields)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status = %d, want 400; body=%s", tc.fields, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), tc.wantMsg) {
+			t.Fatalf("%s: body = %s, want containing %q", tc.fields, rec.Body.String(), tc.wantMsg)
+		}
+	}
+	sub := readSubscriptionAuthFile(t, filePath)["subscription"].(map[string]any)
+	if sub["start"] != "2026-11-03" || sub["cycle"] != "monthly" {
+		t.Fatalf("invalid patches mutated persisted subscription: %#v", sub)
+	}
+}

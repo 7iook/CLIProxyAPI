@@ -523,3 +523,35 @@ func TestMergeRefreshedAndExistingAuthMetadataPreservesSIWC(t *testing.T) {
 		t.Fatalf("merged siwc lost client_id or device_id: %#v", mergedSIWC)
 	}
 }
+
+func TestMergeRefreshedAuthPreservesSubscriptionMetadata(t *testing.T) {
+	subscription := map[string]any{"start": "2026-11-03", "cycle": "monthly", "auto_renew": false}
+	base := &Auth{ID: "claude-sub", Provider: "claude", Metadata: map[string]any{"access_token": "tok-old", "subscription": subscription}}
+	current := base.Clone()
+	updated := base.Clone()
+	updated.Metadata["access_token"] = "tok-new"
+
+	merged := MergeRefreshedAuth(base, current, updated)
+	if got, _ := merged.Metadata["access_token"].(string); got != "tok-new" {
+		t.Fatalf("access_token = %q, want tok-new", got)
+	}
+	if !reflect.DeepEqual(merged.Metadata["subscription"], subscription) {
+		t.Fatalf("subscription = %#v, want %#v", merged.Metadata["subscription"], subscription)
+	}
+
+	// A subscription edited while the refresh was in flight must win.
+	edited := map[string]any{"start": "2026-11-05", "cycle": "monthly", "auto_renew": true}
+	current = base.Clone()
+	current.Metadata["subscription"] = edited
+	merged = MergeRefreshedAuth(base, current, updated)
+	if !reflect.DeepEqual(merged.Metadata["subscription"], edited) {
+		t.Fatalf("concurrent subscription edit lost: %#v", merged.Metadata["subscription"])
+	}
+
+	// Re-login keeps the manually maintained subscription.
+	relogin := &Auth{Provider: "claude", Metadata: map[string]any{"access_token": "tok-relogin"}}
+	MergeExistingAuthMetadata(relogin, map[string]any{"access_token": "tok-old", "subscription": subscription})
+	if !reflect.DeepEqual(relogin.Metadata["subscription"], subscription) {
+		t.Fatalf("re-login lost subscription: %#v", relogin.Metadata["subscription"])
+	}
+}

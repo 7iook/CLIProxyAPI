@@ -371,6 +371,13 @@ func applyAuthFileFieldsPatch(targetAuth *coreauth.Auth, req map[string]json.Raw
 
 	changed := false
 	touchedRoots := make(map[string]struct{}, len(req))
+	fieldPaths := make([]string, 0, len(req))
+	for key := range req {
+		fieldPaths = append(fieldPaths, key)
+	}
+	if hasConflictingSubscriptionPatch(fieldPaths) {
+		return &authFileFieldPatchError{message: "subscription cannot be patched together with subscription.* fields in one request"}
+	}
 	for key, rawValue := range req {
 		fieldPath := strings.TrimSpace(key)
 		if fieldPath == "" {
@@ -423,6 +430,10 @@ func applyAuthFileFieldsPatch(targetAuth *coreauth.Auth, req map[string]json.Raw
 			}
 		} else if fieldPath == "headers" {
 			applyAuthFileHeadersPatch(targetAuth, value)
+		} else if rootAuthFileField(fieldPath) == authFileSubscriptionKey {
+			if errSub := applyAuthFileSubscriptionPatch(targetAuth.Metadata, fieldPath, value); errSub != nil {
+				return &authFileFieldPatchError{message: errSub.Error()}
+			}
 		} else if errSet := setAuthFileMetadataValue(targetAuth.Metadata, fieldPath, value); errSet != nil {
 			return &authFileFieldPatchError{message: errSet.Error()}
 		}
