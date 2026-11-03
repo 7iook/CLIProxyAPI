@@ -10,11 +10,14 @@ import (
 //
 // Stored in the auth file JSON as:
 //
-//	"subscription": {"start": "2026-11-03", "cycle": "monthly", "auto_renew": false, "end": "2026-12-03"}
+//	"subscription": {"start": "2026-11-03", "cycle": "monthly", "auto_renew": false, "end": "2026-12-03 18:30"}
 //
-// Dates are calendar dates in Asia/Shanghai. Billing periods follow Stripe's
-// calendar-month anchoring: each period end is start + k*cycle computed from the
-// original anchor and clamped to the month end (Jan 31 -> Feb 28/29 -> Mar 31).
+// start and end are Asia/Shanghai wall-clock values with minute precision. They are
+// accepted as "YYYY-MM-DD" (00:00), "YYYY-MM-DD HH:mm" or "YYYY-MM-DDTHH:mm" and stored
+// normalised: a date-only value stays "YYYY-MM-DD", a timed value becomes "YYYY-MM-DD HH:mm".
+// Billing periods follow Stripe's calendar-month anchoring: each period end is
+// start + k*cycle computed from the original anchor, clamped to the month end
+// (Jan 31 -> Feb 28/29 -> Mar 31), keeping the time of day.
 
 const (
 	authFileSubscriptionKey = "subscription"
@@ -32,31 +35,39 @@ const (
 	subscriptionStateExpired = "expired"
 	subscriptionStateUnset   = "unset"
 
-	subscriptionWarningDays = 7
-	subscriptionDateLayout  = "2006-01-02"
+	subscriptionWarningDays    = 7
+	subscriptionSecondsPerDay  = 24 * 60 * 60
+	subscriptionDateLayout     = "2006-01-02"
+	subscriptionMinuteLayout   = "2006-01-02 15:04"
+	subscriptionMinuteLayoutT  = "2006-01-02T15:04"
+	subscriptionValueFormatMsg = "YYYY-MM-DD or YYYY-MM-DD HH:mm"
 
 	// maxSubscriptionRollPeriods bounds the auto-renew roll-forward loop.
 	maxSubscriptionRollPeriods = 12 * 500
 )
 
-// subscriptionLocation is the zone used to decide "today" (Asia/Shanghai, no DST).
+// subscriptionLocation is the zone all subscription values are interpreted in (Asia/Shanghai, no DST).
 var subscriptionLocation = time.FixedZone("CST", 8*3600)
 
 // authFileSubscription is the validated form of the subscription metadata.
-// Dates are stored as UTC midnight values so day arithmetic is exact.
+// Start and End are instants in subscriptionLocation; the HasTime flags remember
+// whether a time of day was entered so the stored format round-trips.
 type authFileSubscription struct {
-	Start     time.Time
-	Cycle     string
-	AutoRenew bool
-	End       *time.Time
+	Start        time.Time
+	StartHasTime bool
+	Cycle        string
+	AutoRenew    bool
+	End          *time.Time
+	EndHasTime   bool
 }
 
 // authFileSubscriptionPeriod is the computed current period.
 type authFileSubscriptionPeriod struct {
-	Start    time.Time
-	End      time.Time
-	DaysLeft int
-	State    string
+	Start       time.Time
+	End         time.Time
+	SecondsLeft int64
+	DaysLeft    int
+	State       string
 }
 
 func subscriptionCycleMonths(cycle string) int {
@@ -66,16 +77,13 @@ func subscriptionCycleMonths(cycle string) int {
 	return 1
 }
 
-func subscriptionDate(year int, month time.Month, day int) time.Time {
-	return time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
-}
-
 func daysInMonth(year int, month time.Month) int {
 	return time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
 }
 
-// addMonthsClamped adds months to anchor, clamping the day to the target month end.
-// Callers must always pass the original anchor (anchor + k*months) so the day never drifts.
+// addMonthsClamped adds months to anchor, clamping the day to the target month end and
+// keeping the time of day and location. Callers must always pass the original anchor
+// (anchor + k*months) so the day never drifts.
 func addMonthsClamped(anchor time.Time, months int) time.Time {
 	year, month, day := anchor.Date()
 	total := int(month) - 1 + months
@@ -90,30 +98,42 @@ func addMonthsClamped(anchor time.Time, months int) time.Time {
 	if last := daysInMonth(targetYear, targetMonth); day > last {
 		day = last
 	}
-	return subscriptionDate(targetYear, targetMonth, day)
+	return time.Date(targetYear, targetMonth, day, anchor.Hour(), anchor.Minute(), 0, 0, anchor.Location())
 }
 
-// subscriptionToday returns today's calendar date in Asia/Shanghai as UTC midnight.
-func subscriptionToday(now time.Time) time.Time {
-	year, month, day := now.In(subscriptionLocation).Date()
-	return subscriptionDate(year, month, day)
+// floorDiv divides rounding toward negative infinity.
+func floorDiv(a, b int64) int64 {
+	q := a / b
+	if (a%b != 0) && ((a < 0) != (b < 0)) {
+		q--
+	}
+	return q
 }
 
-func subscriptionDaysBetween(from, to time.Time) int {
-	return int(to.Sub(from).Hours() / 24)
-}
-
-func parseSubscriptionDate(field string, value any) (time.Time, error) {
+// parseSubscriptionTime parses a start/end value in Asia/Shanghai and reports whether
+// a time of day was given.
+func parseSubscriptionTime(field string, value any) (time.Time, bool, error) {
 	text, ok := value.(string)
 	if !ok {
-		return time.Time{}, fmt.Errorf("subscription.%s must be a date string in YYYY-MM-DD format", field)
+		return time.Time{}, false, fmt.Errorf("subscription.%s must be a string in %s format", field, subscriptionValueFormatMsg)
 	}
 	text = strings.TrimSpace(text)
-	parsed, err := time.Parse(subscriptionDateLayout, text)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("subscription.%s must be a valid date in YYYY-MM-DD format, got %q", field, text)
+	if parsed, err := time.ParseInLocation(subscriptionDateLayout, text, subscriptionLocation); err == nil {
+		return parsed, false, nil
 	}
-	return subscriptionDate(parsed.Year(), parsed.Month(), parsed.Day()), nil
+	for _, layout := range []string{subscriptionMinuteLayout, subscriptionMinuteLayoutT} {
+		if parsed, err := time.ParseInLocation(layout, text, subscriptionLocation); err == nil {
+			return parsed, true, nil
+		}
+	}
+	return time.Time{}, false, fmt.Errorf("subscription.%s must be a valid date in %s format, got %q", field, subscriptionValueFormatMsg, text)
+}
+
+func formatSubscriptionValue(t time.Time, hasTime bool) string {
+	if hasTime {
+		return t.In(subscriptionLocation).Format(subscriptionMinuteLayout)
+	}
+	return t.In(subscriptionLocation).Format(subscriptionDateLayout)
 }
 
 // parseAuthFileSubscription validates a subscription object (as decoded from JSON).
@@ -135,11 +155,11 @@ func parseAuthFileSubscription(value any) (authFileSubscription, error) {
 	if !okStart || rawStart == nil {
 		return authFileSubscription{}, fmt.Errorf("subscription.start is required (send subscription: null to remove the subscription)")
 	}
-	start, err := parseSubscriptionDate(subscriptionFieldStart, rawStart)
+	start, startHasTime, err := parseSubscriptionTime(subscriptionFieldStart, rawStart)
 	if err != nil {
 		return authFileSubscription{}, err
 	}
-	sub.Start = start
+	sub.Start, sub.StartHasTime = start, startHasTime
 
 	sub.Cycle = subscriptionCycleMonthly
 	if rawCycle, okCycle := object[subscriptionFieldCycle]; okCycle && rawCycle != nil {
@@ -161,14 +181,14 @@ func parseAuthFileSubscription(value any) (authFileSubscription, error) {
 
 	// An empty string clears the manual end date, same as null.
 	if rawEnd, okEnd := object[subscriptionFieldEnd]; okEnd && rawEnd != nil && !isBlankString(rawEnd) {
-		end, errEnd := parseSubscriptionDate(subscriptionFieldEnd, rawEnd)
+		end, endHasTime, errEnd := parseSubscriptionTime(subscriptionFieldEnd, rawEnd)
 		if errEnd != nil {
 			return authFileSubscription{}, errEnd
 		}
 		if end.Before(sub.Start) {
 			return authFileSubscription{}, fmt.Errorf("subscription.end must not be before subscription.start")
 		}
-		sub.End = &end
+		sub.End, sub.EndHasTime = &end, endHasTime
 	}
 	return sub, nil
 }
@@ -181,19 +201,20 @@ func isBlankString(value any) bool {
 // metadataValue returns the canonical JSON-friendly form stored in the auth file.
 func (s authFileSubscription) metadataValue() map[string]any {
 	out := map[string]any{
-		subscriptionFieldStart:     s.Start.Format(subscriptionDateLayout),
+		subscriptionFieldStart:     formatSubscriptionValue(s.Start, s.StartHasTime),
 		subscriptionFieldCycle:     s.Cycle,
 		subscriptionFieldAutoRenew: s.AutoRenew,
 	}
 	if s.End != nil {
-		out[subscriptionFieldEnd] = s.End.Format(subscriptionDateLayout)
+		out[subscriptionFieldEnd] = formatSubscriptionValue(*s.End, s.EndHasTime)
 	}
 	return out
 }
 
-// computeSubscriptionPeriod resolves the current billing period relative to now (CST calendar day).
+// computeSubscriptionPeriod resolves the current billing period relative to now.
+// The subscription is expired once now reaches the period end instant.
 func computeSubscriptionPeriod(sub authFileSubscription, now time.Time) authFileSubscriptionPeriod {
-	today := subscriptionToday(now)
+	now = now.In(subscriptionLocation)
 	months := subscriptionCycleMonths(sub.Cycle)
 
 	period := authFileSubscriptionPeriod{Start: sub.Start}
@@ -212,17 +233,18 @@ func computeSubscriptionPeriod(sub authFileSubscription, now time.Time) authFile
 		period.End = addMonthsClamped(sub.Start, months)
 	default:
 		period.End = addMonthsClamped(sub.Start, months)
-		for k := 1; k <= maxSubscriptionRollPeriods && !today.Before(period.End); k++ {
+		for k := 1; k <= maxSubscriptionRollPeriods && !now.Before(period.End); k++ {
 			period.Start = period.End
 			period.End = addMonthsClamped(sub.Start, (k+1)*months)
 		}
 	}
 
-	period.DaysLeft = subscriptionDaysBetween(today, period.End)
+	period.SecondsLeft = int64(period.End.Sub(now) / time.Second)
+	period.DaysLeft = int(floorDiv(period.SecondsLeft, subscriptionSecondsPerDay))
 	switch {
-	case period.DaysLeft < 0:
+	case period.SecondsLeft <= 0:
 		period.State = subscriptionStateExpired
-	case period.DaysLeft <= subscriptionWarningDays:
+	case period.SecondsLeft <= subscriptionWarningDays*subscriptionSecondsPerDay:
 		period.State = subscriptionStateWarning
 	default:
 		period.State = subscriptionStateActive
@@ -254,9 +276,11 @@ func authFileSubscriptionPayload(metadata map[string]any, now time.Time) (map[st
 	if _, hasEnd := payload[subscriptionFieldEnd]; !hasEnd {
 		payload[subscriptionFieldEnd] = nil
 	}
-	payload["period_start"] = period.Start.Format(subscriptionDateLayout)
-	payload["period_end"] = period.End.Format(subscriptionDateLayout)
+	payload["period_start"] = period.Start.In(subscriptionLocation).Format(subscriptionMinuteLayout)
+	payload["period_end"] = period.End.In(subscriptionLocation).Format(subscriptionMinuteLayout)
+	payload["expires_at"] = period.End.In(subscriptionLocation).Format(time.RFC3339)
 	payload["days_left"] = period.DaysLeft
+	payload["seconds_left"] = period.SecondsLeft
 	payload["state"] = period.State
 	return payload, true
 }

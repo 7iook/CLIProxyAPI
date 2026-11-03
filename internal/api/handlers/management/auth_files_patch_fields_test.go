@@ -1597,7 +1597,7 @@ func TestPatchAuthFileFields_SubscriptionPersistsAndEchoes(t *testing.T) {
 	if !ok {
 		t.Fatalf("entry subscription = %#v, want object", entry["subscription"])
 	}
-	if echo["period_end"] != "2026-11-20" || echo["state"] == nil || echo["days_left"] == nil {
+	if echo["period_end"] != "2026-11-20 00:00" || echo["state"] == nil || echo["days_left"] == nil {
 		t.Fatalf("entry subscription echo = %#v", echo)
 	}
 }
@@ -1641,6 +1641,7 @@ func TestPatchAuthFileFields_SubscriptionRejectsInvalid(t *testing.T) {
 		{`"subscription":{"start":"2026-11-03","auto_renew":1}`, "subscription.auto_renew must be a boolean"},
 		{`"subscription":"2026-11-03"`, "subscription must be an object or null"},
 		{`"subscription.end":"2026-11-99"`, "subscription.end must be a valid date"},
+		{`"subscription.end":"2026-11-20 24:00"`, "subscription.end must be a valid date"},
 		{`"subscription.start":null`, "subscription.start is required"},
 		{`"subscription.foo":1`, "subscription.foo is not a supported field"},
 		{`"subscription":{"start":"2026-11-03"},"subscription.end":"2026-12-01"`, "cannot be patched together"},
@@ -1695,10 +1696,27 @@ func TestV8CredentialsSubscriptionPatchAndList(t *testing.T) {
 	if !ok {
 		t.Fatalf("v8 list entry subscription = %#v", resp.Files[0]["subscription"])
 	}
-	if sub["start"] != "2026-11-03" || sub["period_end"] != "2026-12-03" || sub["state"] == nil {
+	if sub["start"] != "2026-11-03" || sub["period_end"] != "2026-12-03 00:00" || sub["state"] == nil {
 		t.Fatalf("v8 list subscription = %#v", sub)
 	}
 	if _, hasEnd := sub["end"]; !hasEnd {
 		t.Fatal("v8 list subscription missing end key")
+	}
+}
+
+func TestPatchAuthFileFields_SubscriptionMinutePrecision(t *testing.T) {
+	h, manager, filePath := newSubscriptionPatchFixture(t)
+	rec := patchSubscriptionFields(t, h, `"subscription":{"start":"2026-11-03T08:05","cycle":"monthly","auto_renew":false,"end":"2026-12-03 18:30"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	sub := readSubscriptionAuthFile(t, filePath)["subscription"].(map[string]any)
+	if sub["start"] != "2026-11-03 08:05" || sub["end"] != "2026-12-03 18:30" {
+		t.Fatalf("persisted subscription = %#v, want normalised minute values", sub)
+	}
+	updated, _ := manager.GetByID("claude-sub.json")
+	echo := h.buildAuthFileEntry(updated, authFileQuotaContext{})["subscription"].(map[string]any)
+	if echo["period_end"] != "2026-12-03 18:30" || echo["expires_at"] != "2026-12-03T18:30:00+08:00" || echo["seconds_left"] == nil {
+		t.Fatalf("echo = %#v", echo)
 	}
 }
