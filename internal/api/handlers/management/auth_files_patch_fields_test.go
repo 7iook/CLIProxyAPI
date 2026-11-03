@@ -1659,3 +1659,46 @@ func TestPatchAuthFileFields_SubscriptionRejectsInvalid(t *testing.T) {
 		t.Fatalf("invalid patches mutated persisted subscription: %#v", sub)
 	}
 }
+
+func TestV8CredentialsSubscriptionPatchAndList(t *testing.T) {
+	h, _, _ := newSubscriptionPatchFixture(t)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Set(ConfigV8ContextKey, true)
+	body := `{"name":"claude-sub.json","subscription":{"start":"2026-11-03","cycle":"monthly","auto_renew":false,"end":null}}`
+	ctx.Request = httptest.NewRequest(http.MethodPatch, "/v8/management/credentials/fields", strings.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	h.PatchAuthFileFields(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("v8 patch status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	ctx, _ = gin.CreateTestContext(rec)
+	ctx.Set(ConfigV8ContextKey, true)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v8/management/credentials", nil)
+	h.ListAuthFiles(ctx)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("v8 list status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Files []map[string]any `json:"files"`
+	}
+	if errUnmarshal := json.Unmarshal(rec.Body.Bytes(), &resp); errUnmarshal != nil {
+		t.Fatalf("Unmarshal() error = %v", errUnmarshal)
+	}
+	if len(resp.Files) != 1 {
+		t.Fatalf("files = %d, want 1", len(resp.Files))
+	}
+	sub, ok := resp.Files[0]["subscription"].(map[string]any)
+	if !ok {
+		t.Fatalf("v8 list entry subscription = %#v", resp.Files[0]["subscription"])
+	}
+	if sub["start"] != "2026-11-03" || sub["period_end"] != "2026-12-03" || sub["state"] == nil {
+		t.Fatalf("v8 list subscription = %#v", sub)
+	}
+	if _, hasEnd := sub["end"]; !hasEnd {
+		t.Fatal("v8 list subscription missing end key")
+	}
+}
