@@ -331,7 +331,7 @@ func (h *Handler) GetOAuthCallbackV8(c *gin.Context) {
 func (h *Handler) handleOAuthCallbackV8(c *gin.Context, req siwcCallbackRequest) {
 	state := strings.TrimSpace(req.State)
 	var redirect *url.URL
-	if raw := strings.TrimSpace(req.RedirectURL); raw != "" {
+	if raw := strings.TrimSpace(req.RedirectURL); raw != "" && isHTTPCallbackURL(raw) {
 		var errParse error
 		redirect, errParse = url.Parse(raw)
 		if errParse != nil {

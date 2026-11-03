@@ -53,7 +53,13 @@ func (h *Handler) handleOAuthCallback(c *gin.Context, req oauthCallbackRequest) 
 	code := strings.TrimSpace(req.Code)
 	errMsg := strings.TrimSpace(req.Error)
 
-	if rawRedirect := strings.TrimSpace(req.RedirectURL); rawRedirect != "" {
+	if rawRedirect := strings.TrimSpace(req.RedirectURL); rawRedirect != "" && !isHTTPCallbackURL(rawRedirect) {
+		// Manual copy-paste input (e.g. the Claude code page shows "code#state"):
+		// treat a non-URL redirect_url as the code itself.
+		if code == "" {
+			code = rawRedirect
+		}
+	} else if rawRedirect != "" {
 		u, errParse := url.Parse(rawRedirect)
 		if errParse != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid redirect_url"})
@@ -70,6 +76,21 @@ func (h *Handler) handleOAuthCallback(c *gin.Context, req oauthCallbackRequest) 
 			errMsg = strings.TrimSpace(q.Get("error"))
 			if errMsg == "" {
 				errMsg = strings.TrimSpace(q.Get("error_description"))
+			}
+		}
+	}
+
+	// Claude returns the code as "code#state"; split it so a pasted code still
+	// resolves its session. A fragment state must agree with any explicit state.
+	if idx := strings.Index(code, "#"); idx >= 0 {
+		fragmentState := strings.TrimSpace(code[idx+1:])
+		code = strings.TrimSpace(code[:idx])
+		if fragmentState != "" {
+			if state == "" {
+				state = fragmentState
+			} else if fragmentState != state {
+				c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "state does not match code"})
+				return
 			}
 		}
 	}
@@ -136,6 +157,18 @@ func (h *Handler) handleOAuthCallback(c *gin.Context, req oauthCallbackRequest) 
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// isHTTPCallbackURL reports whether a pasted callback is an absolute http(s)
+// URL rather than a bare authorization code.
+func isHTTPCallbackURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		// Keep the historic "invalid redirect_url" answer for broken URLs.
+		lower := strings.ToLower(raw)
+		return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
+	}
+	return (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
 func firstNonEmpty(values ...string) string {

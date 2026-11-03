@@ -660,6 +660,11 @@ func NormalizeOAuthProvider(provider string) (string, error) {
 }
 
 func NormalizeOAuthCallbackProvider(provider string) (string, error) {
+	// The Claude setup-token flow registers its session as "anthropic" but the
+	// management panel submits its callback under the tile id.
+	if strings.EqualFold(strings.TrimSpace(provider), "claude-setup-token") {
+		return "anthropic", nil
+	}
 	if normalized, errNormalize := NormalizeOAuthProvider(provider); errNormalize == nil {
 		return normalized, nil
 	}
