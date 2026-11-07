@@ -28,6 +28,15 @@ type authAutoRefreshLoop struct {
 
 	wakeCh chan struct{}
 	jobs   chan *authRefreshJob
+
+	// lastDispatch / lastSpinWarn are only touched by the loop goroutine.
+	lastDispatch map[string]refreshDispatch
+	lastSpinWarn time.Time
+}
+
+type refreshDispatch struct {
+	at    time.Time
+	epoch uint64
 }
 
 type authRefreshJob struct {
@@ -50,13 +59,14 @@ func newAuthAutoRefreshLoop(manager *Manager, interval time.Duration, concurrenc
 		jobBuffer = 64
 	}
 	return &authAutoRefreshLoop{
-		manager:     manager,
-		interval:    interval,
-		concurrency: concurrency,
-		index:       make(map[string]*refreshHeapItem),
-		dirty:       make(map[string]struct{}),
-		wakeCh:      make(chan struct{}, 1),
-		jobs:        make(chan *authRefreshJob, jobBuffer),
+		manager:      manager,
+		interval:     interval,
+		concurrency:  concurrency,
+		index:        make(map[string]*refreshHeapItem),
+		dirty:        make(map[string]struct{}),
+		lastDispatch: make(map[string]refreshDispatch),
+		wakeCh:       make(chan struct{}, 1),
+		jobs:         make(chan *authRefreshJob, jobBuffer),
 	}
 }
 
@@ -100,10 +110,18 @@ func (l *authAutoRefreshLoop) worker(ctx context.Context) {
 			if job == nil {
 				continue
 			}
+			// A refresh that returns early (error, vetoed inside refresh, job no longer
+			// current) leaves the credential due. Clearing the pending marker to zero
+			// would requeue it at "now" and spin the scheduler, so back off instead.
+			// finishRefreshJob only applies retryAt when no newer outcome was recorded.
+			// A stale job (not begun) keeps the zero retry so its replacement runs.
+			var retryAt time.Time
 			if l.manager.beginRefreshJob(ctx, job) {
-				_, _ = l.manager.refreshAuthForRequestAtEpoch(ctx, job.id, "", job.registrationEpoch)
+				if _, err := l.manager.refreshAuthForRequestAtEpoch(ctx, job.id, "", job.registrationEpoch); err != nil {
+					retryAt = time.Now().Add(refreshFailureBackoff)
+				}
 			}
-			l.manager.finishRefreshJob(job, time.Time{}, false)
+			l.manager.finishRefreshJob(job, retryAt, false)
 		}
 	}
 }
@@ -235,7 +253,7 @@ func (l *authAutoRefreshLoop) handleDue(ctx context.Context, now time.Time) {
 		return
 	}
 	if log.IsLevelEnabled(log.DebugLevel) {
-		log.Debugf("auto-refresh scheduler due auths: %d", len(due))
+		log.Debugf("auto-refresh scheduler due auths: %d %v", len(due), due)
 	}
 	for _, authID := range due {
 		l.handleDueAuth(ctx, now, authID)
@@ -282,6 +300,7 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 	manager.mu.RUnlock()
 
 	if !shouldSchedule {
+		delete(l.lastDispatch, authID)
 		l.remove(authID)
 		return
 	}
@@ -300,6 +319,19 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 	if exec == nil {
 		l.upsert(authID, now.Add(l.interval))
 		return
+	}
+
+	// Last-resort spin guard: never dispatch the same credential more than once
+	// per interval, whatever path put it back at "now".
+	if last, ok := l.lastDispatch[authID]; ok && last.epoch == registrationEpoch {
+		if since := now.Sub(last.at); since >= 0 && since < l.interval {
+			if now.Sub(l.lastSpinWarn) >= time.Minute {
+				l.lastSpinWarn = now
+				log.Warnf("auto-refresh spin guard: %s due again %s after dispatch, deferring", authID, since.Round(time.Millisecond))
+			}
+			l.upsert(authID, last.at.Add(l.interval))
+			return
+		}
 	}
 
 	job := manager.markRefreshPending(l, authID, registrationEpoch, now)
@@ -323,6 +355,7 @@ func (l *authAutoRefreshLoop) handleDueAuth(ctx context.Context, now time.Time, 
 		select {
 		case <-ctx.Done():
 		case l.jobs <- job:
+			l.lastDispatch[authID] = refreshDispatch{at: now, epoch: registrationEpoch}
 			return
 		default:
 		}
