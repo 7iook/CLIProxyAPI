@@ -160,11 +160,17 @@ func (m *Manager) sessionAffinitySelector() *SessionAffinitySelector {
 		return nil
 	}
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if m.pluginScheduler != nil {
-		return nil
+	scheduler := m.pluginScheduler
+	selector := m.selector
+	m.mu.RUnlock()
+	// The plugin host is always wired in as the scheduler; it only takes over
+	// selection when a plugin actually registered one.
+	if scheduler != nil {
+		if state, ok := scheduler.(pluginSchedulerState); !ok || state.HasScheduler() {
+			return nil
+		}
 	}
-	sel, _ := m.selector.(*SessionAffinitySelector)
+	sel, _ := selector.(*SessionAffinitySelector)
 	return sel
 }
 

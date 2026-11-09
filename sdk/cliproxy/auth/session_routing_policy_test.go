@@ -176,3 +176,30 @@ func TestSessionRoutingPolicy_NoSessionIDExcludesAcrossPriorities(t *testing.T) 
 		}
 	}
 }
+
+type activePluginScheduler struct{ inactivePluginScheduler }
+
+func (*activePluginScheduler) HasScheduler() bool { return true }
+
+func TestSessionRoutingPolicy_SupportedWhenPluginHostHasNoScheduler(t *testing.T) {
+	t.Parallel()
+	sel := NewSessionAffinitySelector(&RoundRobinSelector{})
+	defer sel.Stop()
+	m := NewManager(nil, sel, nil)
+
+	m.SetPluginScheduler(&inactivePluginScheduler{})
+	if !m.SetSessionRoutingPolicy("auth-a", SessionRoutingPolicy{ExcludeNew: true}) {
+		t.Fatal("SetSessionRoutingPolicy() = false with an idle plugin host, want true")
+	}
+	if _, ok := m.SessionRoutingPolicyFor("auth-a"); !ok {
+		t.Fatal("policy not stored with an idle plugin host")
+	}
+	if !m.ClearSessionRoutingPolicy("auth-a") {
+		t.Fatal("ClearSessionRoutingPolicy() = false with an idle plugin host, want true")
+	}
+
+	m.SetPluginScheduler(&activePluginScheduler{})
+	if m.SetSessionRoutingPolicy("auth-a", SessionRoutingPolicy{ExcludeNew: true}) {
+		t.Fatal("SetSessionRoutingPolicy() = true while a plugin scheduler is active, want false")
+	}
+}
