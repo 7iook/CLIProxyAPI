@@ -140,7 +140,8 @@ const (
 	MethodHostAuthModels         = "host.auth.models"
 	MethodHostAffinityLookup     = "host.affinity.lookup"
 
-	MethodHostRoutingResetCooldown = "host.routing.reset_cooldown"
+	MethodHostRoutingResetCooldown    = "host.routing.reset_cooldown"
+	MethodHostRoutingSetSessionPolicy = "host.routing.set_session_policy"
 )
 
 type Envelope struct {

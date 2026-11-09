@@ -915,6 +915,7 @@ type SessionAffinitySelector struct {
 	matcher           *cliproxysession.MerklePrefixMatcher
 	subagentAffinity  bool
 	rebindOnQuotaOnly bool
+	routingPolicies   sessionRoutingPolicies
 }
 
 const (
@@ -1151,7 +1152,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			return nil, errAvailable
 		}
 		entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
-		return s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+		return s.fallback.Pick(ctx, provider, model, opts, s.newBindingCandidates(fallbackAuths, now))
 	}
 
 	// A single availability pass serves both lookups: the bound credential is validated against
@@ -1161,6 +1162,12 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		return nil, err
 	}
 	fallbackAuths := highestPriorityAuths(available)
+	// New bindings honour exclude_new policies; the filter runs across priorities first so an
+	// excluded top-tier credential yields to a lower tier before failing open.
+	newAuths := fallbackAuths
+	if s.routingPolicies.hasAny() {
+		newAuths = highestPriorityAuths(s.newBindingCandidates(available, now))
+	}
 
 	modelKey := canonicalModelKey(model)
 	cacheKey := provider + "::" + primaryID + "::" + modelKey
@@ -1199,13 +1206,23 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
 			if auth.ID == cachedAuthID {
+				if s.forceRebindActive(auth.ID, now) {
+					if alternatives := s.rebindCandidates(available, auth.ID, now); alternatives != nil {
+						moved, errMove := s.fallback.Pick(ctx, provider, model, opts, highestPriorityAuths(alternatives))
+						if errMove == nil && moved != nil {
+							bind(moved.ID, true)
+							entry.Infof("session-affinity: routing policy force rebind | session=%s from_auth=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, moved.ID, provider, model)
+							return moved, nil
+						}
+					}
+				}
 				bind(auth.ID, true)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 				return auth, nil
 			}
 		}
 		// Cached auth not available, reselect via fallback selector for even distribution
-		auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+		auth, err := s.fallback.Pick(ctx, provider, model, opts, newAuths)
 		if err != nil {
 			return nil, err
 		}
@@ -1236,7 +1253,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 		if parentAuthID := s.cache.latestSessionAuth(fallbackID, providers); parentAuthID != "" {
 			for _, auth := range available {
-				if auth.ID == parentAuthID {
+				if auth.ID == parentAuthID && !s.forceRebindActive(auth.ID, now) {
 					bind(auth.ID, true)
 					entry.Infof("session-affinity: guardian inherited parent binding | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 					return auth, nil
@@ -1248,7 +1265,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if fallbackKey != "" {
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
 			for _, auth := range available {
-				if auth.ID == cachedAuthID {
+				if auth.ID == cachedAuthID && !s.forceRebindActive(auth.ID, now) {
 					if !isSubagent || s.subagentAffinity {
 						bind(auth.ID, true)
 						if isFork {
@@ -1275,7 +1292,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 	}
 
-	auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+	auth, err := s.fallback.Pick(ctx, provider, model, opts, newAuths)
 	if err != nil {
 		return nil, err
 	}

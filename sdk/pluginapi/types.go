@@ -993,6 +993,36 @@ type HostRoutingResetCooldownResponse struct {
 	Models []string `json:"models,omitempty"`
 }
 
+// HostRoutingSetSessionPolicyRequest installs or clears a session-affinity routing policy for one
+// credential. Exactly one of AuthIndex or AuthID identifies the credential.
+//
+// ExcludeNew keeps the credential out of new session bindings; sessions already bound to it stay.
+// ForceRebind (implies ExcludeNew) moves sessions bound to it onto another credential on their next
+// request. Both fail open when no other credential is available. Until bounds the policy; nil never
+// expires. Clear removes the policy, as does a request with neither flag set. The policy lives in
+// memory only and is lost on host restart, so plugins should reapply it after startup.
+type HostRoutingSetSessionPolicyRequest struct {
+	AuthIndex   string     `json:"auth_index,omitempty"`
+	AuthID      string     `json:"auth_id,omitempty"`
+	ExcludeNew  bool       `json:"exclude_new,omitempty"`
+	ForceRebind bool       `json:"force_rebind,omitempty"`
+	Until       *time.Time `json:"until,omitempty"`
+	Reason      string     `json:"reason,omitempty"`
+	Clear       bool       `json:"clear,omitempty"`
+}
+
+// HostRoutingSetSessionPolicyResponse reports the policy now in effect for the credential.
+// Supported is false when session affinity is not the active selector; nothing is stored then.
+type HostRoutingSetSessionPolicyResponse struct {
+	Supported   bool       `json:"supported"`
+	AuthIndex   string     `json:"auth_index,omitempty"`
+	AuthID      string     `json:"auth_id,omitempty"`
+	Active      bool       `json:"active"`
+	ExcludeNew  bool       `json:"exclude_new,omitempty"`
+	ForceRebind bool       `json:"force_rebind,omitempty"`
+	Until       *time.Time `json:"until,omitempty"`
+}
+
 // HTTPWireProfile configures transport-level wire representation for plugin HTTP requests.
 type HTTPWireProfile struct {
 	// HTTP1Only forces the transport to use HTTP/1.1 and disables HTTP/2 negotiation.
