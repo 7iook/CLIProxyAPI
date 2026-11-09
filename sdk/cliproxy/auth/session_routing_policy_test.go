@@ -155,3 +155,24 @@ func TestManagerSetSessionRoutingPolicy(t *testing.T) {
 		t.Fatalf("manager without affinity selector must report unsupported")
 	}
 }
+
+func TestSessionRoutingPolicy_NoSessionIDExcludesAcrossPriorities(t *testing.T) {
+	t.Parallel()
+	s := NewSessionAffinitySelector(&RoundRobinSelector{})
+	defer s.Stop()
+	auths := []*Auth{
+		{ID: "auth-top", Attributes: map[string]string{"priority": "10"}},
+		{ID: "auth-low", Attributes: map[string]string{"priority": "1"}},
+	}
+	s.SetSessionRoutingPolicy("auth-top", SessionRoutingPolicy{ExcludeNew: true})
+	opts := cliproxyexecutor.Options{} // no header, no payload: nothing to derive a session id from
+	for i := 0; i < 4; i++ {
+		got, err := s.Pick(context.Background(), "claude", "claude-opus", opts, auths)
+		if err != nil {
+			t.Fatalf("Pick error = %v", err)
+		}
+		if got == nil || got.ID != "auth-low" {
+			t.Fatalf("no-session request picked %v, want auth-low (top tier excluded)", got)
+		}
+	}
+}

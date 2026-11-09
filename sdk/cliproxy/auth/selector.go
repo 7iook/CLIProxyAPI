@@ -1147,6 +1147,16 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		availabilityCandidates = positiveWeightAuths(auths)
 	}
 	if primaryID == "" {
+		if s.routingPolicies.hasAny() {
+			// Same order as the session path: exclude across every priority tier first, so an
+			// excluded top-tier credential yields to a lower tier before failing open.
+			available, errAvailable := getSelectorAvailableAuthsAcrossPriorities(ctx, availabilityCandidates, provider, model, now)
+			if errAvailable != nil {
+				return nil, errAvailable
+			}
+			entry.Debugf("session-affinity: no session ID extracted, falling back to default selector | provider=%s model=%s", provider, model)
+			return s.fallback.Pick(ctx, provider, model, opts, highestPriorityAuths(s.newBindingCandidates(available, now)))
+		}
 		fallbackAuths, errAvailable := getSelectorAvailableAuths(ctx, availabilityCandidates, provider, model, now)
 		if errAvailable != nil {
 			return nil, errAvailable
