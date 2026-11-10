@@ -34,6 +34,10 @@ const (
 	RedirectURI      = "http://localhost:54545/callback"
 	ClaudeOAuthScope = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 
+	// Native Claude Code includes the Console scope when authorizing a new login.
+	// Keep the established token refresh scope unchanged.
+	claudeOAuthAuthorizeScope = "org:create_api_key " + ClaudeOAuthScope
+
 	// SetupTokenScope is the inference-only scope requested by `claude
 	// setup-token`. It deliberately omits user:profile, so the resulting
 	// sk-ant-oat01- token cannot read the OAuth profile/roles endpoints.
@@ -369,7 +373,7 @@ func (o *ClaudeAuth) GenerateAuthURLWithOptions(state string, pkceCodes *PKCECod
 		return "", "", fmt.Errorf("PKCE codes are required")
 	}
 
-	scope := ClaudeOAuthScope
+	scope := claudeOAuthAuthorizeScope
 	if strings.TrimSpace(opts.Scope) != "" {
 		scope = opts.Scope
 	}
