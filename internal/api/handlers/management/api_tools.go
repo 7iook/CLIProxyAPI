@@ -135,10 +135,17 @@ func (h *Handler) APICall(c *gin.Context) {
 
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
 	auth := h.authByIndex(authIndex)
+	// Setup tokens get 403 on the account profile and reset endpoints; when the
+	// same account also has a full-OAuth credential, those calls run with it so
+	// setup-token cards get the OAuth behaviour. The upstream answer is returned
+	// unchanged. Without a sibling the setup-token call proceeds as before.
+	if sibling := h.claudeSetupTokenAccountSibling(auth, method, parsedURL); sibling != nil {
+		auth = sibling
+	}
 	// Claude setup tokens always get 403 from /api/oauth/usage. Serve their quota
 	// from observed rate-limit headers; when none exist yet, run the
 	// setup-token probe (a 1-token refresh) once to obtain them.
-	if substitute, ok := h.claudeSetupTokenUsageWithProbe(c.Request.Context(), authIndex, auth, method, parsedURL); ok {
+	if substitute, ok := h.claudeSetupTokenUsage(c.Request.Context(), auth, method, parsedURL, claudeUsageRequest{URL: urlStr, Header: body.Header, ProxyURL: requestProxyURL}); ok {
 		c.JSON(http.StatusOK, substitute)
 		return
 	}

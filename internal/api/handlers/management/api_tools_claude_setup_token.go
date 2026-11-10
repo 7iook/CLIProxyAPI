@@ -53,6 +53,14 @@ func claudeSetupTokenUsageFallback(auth *coreauth.Auth, method string, target *u
 // endpoint would for a dead credential. Only a working token gets the quota
 // rebuilt from observed rate-limit headers. ok=false keeps the legacy path.
 func (h *Handler) claudeSetupTokenUsageWithProbe(ctx context.Context, authIndex string, auth *coreauth.Auth, method string, target *url.URL) (apiCallResponse, bool) {
+	return h.claudeSetupTokenUsage(ctx, auth, method, target, claudeUsageRequest{})
+}
+
+// claudeSetupTokenUsage is claudeSetupTokenUsageWithProbe plus the official
+// usage of a full-OAuth sibling credential of the same account: after a
+// successful probe, the sibling's /api/oauth/usage answer (limits, Fable
+// window, reset grants) is preferred over the passive body when it succeeds.
+func (h *Handler) claudeSetupTokenUsage(ctx context.Context, auth *coreauth.Auth, method string, target *url.URL, req claudeUsageRequest) (apiCallResponse, bool) {
 	if auth == nil || !coreauth.IsClaudeSetupTokenAuth(auth) {
 		return apiCallResponse{}, false
 	}
@@ -71,6 +79,9 @@ func (h *Handler) claudeSetupTokenUsageWithProbe(ctx context.Context, authIndex 
 	}
 	if refreshed == nil {
 		return apiCallResponse{}, false
+	}
+	if resp, ok := h.claudeSiblingOfficialUsage(ctx, refreshed, req); ok {
+		return resp, true
 	}
 	return claudeSetupTokenUsageFallback(refreshed, method, target, http.StatusForbidden)
 }

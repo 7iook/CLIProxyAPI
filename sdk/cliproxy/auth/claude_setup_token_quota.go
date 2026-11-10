@@ -45,6 +45,13 @@ var claudeUnifiedWindows = []struct{ header, key string }{
 	{"7d_oi", "iguana_necktie"},
 }
 
+// claudeScopedQuotaWindows are oauth/usage keys reported only on responses of
+// the models they meter (7d_oi: the Fable weekly window, present on Fable
+// responses only). They are carried across observations that lack them and
+// are dropped, not reported as 0, once their reset time passes: whether the
+// account still has the window afterwards is unknown until it is seen again.
+var claudeScopedQuotaWindows = map[string]bool{"iguana_necktie": true}
+
 // ClaudeSetupTokenProbeInterval is how often a Claude setup-token credential is
 // revalidated by a 1-token probe in place of an OAuth refresh.
 const ClaudeSetupTokenProbeInterval = 12 * time.Hour
@@ -194,6 +201,30 @@ func toFloat(v any) (float64, bool) {
 	return 0, false
 }
 
+// mergeClaudeQuotaWindows returns next plus every window of prev that next
+// did not observe and whose own reset time is still ahead of next.CapturedAt.
+// Windows present in next always replace prev; a carried window without a
+// reset time is dropped because its validity cannot be bounded.
+func mergeClaudeQuotaWindows(prev, next setupTokenQuota, havePrev bool) setupTokenQuota {
+	if !havePrev || len(prev.Windows) == 0 {
+		return next
+	}
+	out := setupTokenQuota{CapturedAt: next.CapturedAt, Windows: make(map[string]setupTokenWindow, len(next.Windows)+len(prev.Windows))}
+	for key, w := range next.Windows {
+		out.Windows[key] = w
+	}
+	for key, w := range prev.Windows {
+		if _, seen := out.Windows[key]; seen {
+			continue
+		}
+		if w.ResetsAt.IsZero() || !w.ResetsAt.After(next.CapturedAt) {
+			continue
+		}
+		out.Windows[key] = w
+	}
+	return out
+}
+
 // setupTokenQuotaWorthWriting decides whether next replaces prev on disk.
 func setupTokenQuotaWorthWriting(prev, next setupTokenQuota, havePrev bool) bool {
 	if !havePrev {
@@ -236,6 +267,7 @@ func syncClaudeSetupTokenQuotaMetadata(auth *Auth) bool {
 		return false
 	}
 	prev, havePrev := quotaFromMetadata(auth.Metadata)
+	next = mergeClaudeQuotaWindows(prev, next, havePrev)
 	if !setupTokenQuotaWorthWriting(prev, next, havePrev) {
 		return false
 	}
@@ -250,8 +282,10 @@ func syncClaudeSetupTokenQuotaMetadata(auth *Auth) bool {
 
 // ClaudeSetupTokenUsageJSON renders the latest known quota of a setup-token
 // auth as an /api/oauth/usage body, plus "captured_at". The live observation
-// wins over the persisted copy when newer. Windows whose reset time has passed
-// are reported as reset (utilization 0, resets_at null).
+// wins over the persisted copy when newer; windows only the persisted copy has
+// (such as the Fable weekly window) are carried until their reset time.
+// Windows whose reset time has passed are reported as reset (utilization 0,
+// resets_at null), except model-scoped windows, which are omitted.
 func ClaudeSetupTokenUsageJSON(auth *Auth, now time.Time) ([]byte, bool) {
 	if !IsClaudeSetupTokenAuth(auth) {
 		return nil, false
@@ -266,6 +300,8 @@ func ClaudeSetupTokenUsageJSON(auth *Auth, now time.Time) ([]byte, bool) {
 		if !w.ResetsAt.IsZero() {
 			if w.ResetsAt.After(now) {
 				item["resets_at"] = w.ResetsAt.Format(time.RFC3339)
+			} else if claudeScopedQuotaWindows[key] {
+				continue
 			} else {
 				item["utilization"] = 0.0
 			}
@@ -281,7 +317,7 @@ func ClaudeSetupTokenUsageJSON(auth *Auth, now time.Time) ([]byte, bool) {
 func latestClaudeQuota(auth *Auth) (setupTokenQuota, bool) {
 	q, ok := quotaFromMetadata(auth.Metadata)
 	if live, okLive := quotaFromSignals(auth.Quota.Signals, auth.Quota.ObservedAt); okLive && !auth.Quota.ObservedAt.IsZero() && (!ok || live.CapturedAt.After(q.CapturedAt)) {
-		q, ok = live, true
+		q, ok = mergeClaudeQuotaWindows(q, live, ok), true
 	}
 	return q, ok
 }
@@ -363,6 +399,8 @@ func RecordClaudeSetupTokenProbeHeaders(auth *Auth, headers http.Header, now tim
 	if !ok {
 		return false
 	}
+	prev, havePrev := quotaFromMetadata(auth.Metadata)
+	q = mergeClaudeQuotaWindows(prev, q, havePrev)
 	md := cloneMetadataMap(auth.Metadata)
 	if md == nil {
 		md = map[string]any{}
